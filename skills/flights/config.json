@@ -1,4 +1,14 @@
 {
-  "description": "Search for cheap flights across multiple providers",
-  "maxConcurrent": 4
+  "maxConcurrent": 5,
+  "description": "Search for flights across multiple providers",
+  "args": {
+    "from": "Origin airport IATA code (e.g. EZE, JFK, LHR)",
+    "to": "Destination airport IATA code (e.g. JFK, CDG, NRT)",
+    "departure": "Departure date in YYYY-MM-DD format",
+    "return": "Return date YYYY-MM-DD (OPTIONAL — omit this key entirely for one-way flights)"
+  },
+  "requiredFields": ["priceRaw", "airline", "departure", "arrival", "stops"],
+  "routerHints": "For IATA codes: use the main airport code (Buenos Aires → EZE, New York → JFK, London → LHR, etc.). Dates must be YYYY-MM-DD. If no year given, use the current or next occurrence. dd/mm format (Spanish/Argentine): day/month not month/day. If NO return date is mentioned, omit the 'return' arg entirely (one-way search). Only include 'return' if the user explicitly mentions a return date.",
+  "renderer": "flights",
+  "items": "flights"
 }

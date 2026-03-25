@@ -11,6 +11,7 @@
     "dev": "npm run build:web && npm run watch:web & tsx --watch server.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@mariozechner/pi-coding-agent": "^0.62.0",
     "playwright": "^1.52.0",
     "puppeteer": "^24.0.0",

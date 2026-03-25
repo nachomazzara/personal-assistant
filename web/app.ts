@@ -1,4 +1,4 @@
-import { renderFlights, renderCombined, type Flight, type FlightData } from "./renderers/flights.js";
+import { renderFlights, renderCombined } from "./renderers/flights.js";
 import { renderDefault } from "./renderers/default.js";
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ connect();
 // State
 // ---------------------------------------------------------------------------
 const sections = new Map<string, HTMLElement>();
-const sourceData = new Map<string, FlightData>(); // accumulated data per skill
+const sourceData = new Map<string, any>();
 let viewMode: "by-source" | "combined" = "by-source";
 let durationRange = { max: 2000 };
 
@@ -58,6 +58,38 @@ let durationRange = { max: 2000 };
 // ---------------------------------------------------------------------------
 function handleMessage(msg: any) {
   switch (msg.type) {
+    case "routing": {
+      results.innerHTML = `<div class="suggestions-loading">Finding the best search for you...</div>`;
+      break;
+    }
+
+    case "suggestions": {
+      const suggestions: { label: string; category: string; args: Record<string, string> }[] = msg.suggestions;
+      results.innerHTML = `
+        <div class="suggestions">
+          <h3>Pick a search</h3>
+          ${suggestions.map((s, i) => `
+            <button class="suggestion-btn" data-index="${i}">
+              <span class="suggestion-label">${s.label}</span>
+              <span class="suggestion-detail">${formatArgs(s.args)}</span>
+            </button>
+          `).join("")}
+        </div>
+      `;
+
+      // Bind click handlers
+      results.querySelectorAll(".suggestion-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const idx = parseInt((btn as HTMLElement).dataset.index || "0");
+          const pick = suggestions[idx];
+          executeSuggestion(pick);
+        });
+      });
+
+      setLoading(false);
+      break;
+    }
+
     case "skill:start": {
       const id = `${msg.category}/${msg.skill}`;
       const section = document.createElement("div");
@@ -79,6 +111,33 @@ function handleMessage(msg: any) {
       break;
     }
 
+    case "skill:update": {
+      const uid = `${msg.category}/${msg.skill}`;
+      const usection = sections.get(uid);
+      if (!usection) break;
+
+      const udata = msg.data as any;
+      udata.site = udata.site || msg.skill;
+      sourceData.set(uid, udata);
+
+      if (viewMode === "by-source") {
+        const ubody = usection.querySelector(".source-body") as HTMLElement;
+        renderSkillData(msg.category, udata, ubody);
+      } else {
+        renderCombinedView();
+      }
+
+      updateFilterBounds();
+      applyFilters();
+      if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
+
+      const itemsKey = Object.keys(udata).find((k) => Array.isArray(udata[k]));
+      const itemCount = itemsKey ? udata[itemsKey].length : 0;
+      const header = usection.querySelector(".source-header span:last-of-type");
+      if (header) header.textContent = `${msg.skill} (${itemCount} results...)`;
+      break;
+    }
+
     case "skill:done": {
       const id = `${msg.category}/${msg.skill}`;
       const section = sections.get(id);
@@ -97,12 +156,15 @@ function handleMessage(msg: any) {
         header.appendChild(link);
       }
 
-      // Store data for combined view
-      const data = msg.data as FlightData;
+      const data = msg.data as any;
       data.site = data.site || msg.skill;
       sourceData.set(id, data);
 
-      // Render based on current view
+      const doneItemsKey = Object.keys(data).find((k: string) => Array.isArray(data[k]));
+      const finalCount = doneItemsKey ? data[doneItemsKey].length : 0;
+      const nameSpan = section.querySelector(".source-header span:last-of-type");
+      if (nameSpan) nameSpan.textContent = `${msg.skill} (${finalCount})`;
+
       if (viewMode === "by-source") {
         const body = section.querySelector(".source-body") as HTMLElement;
         renderSkillData(msg.category, data, body);
@@ -140,19 +202,37 @@ function handleMessage(msg: any) {
 }
 
 // ---------------------------------------------------------------------------
+// Suggestion helpers
+// ---------------------------------------------------------------------------
+function formatArgs(args: Record<string, string>): string {
+  return Object.entries(args).map(([k, v]) => `${k}: ${v}`).join(" · ");
+}
+
+function executeSuggestion(s: { label: string; category: string; args: Record<string, string> }) {
+  results.innerHTML = "";
+  sections.clear();
+  sourceData.clear();
+  const combinedEl = document.getElementById("combined-results");
+  if (combinedEl) combinedEl.remove();
+  filtersEl.classList.add("hidden");
+
+  setLoading(true);
+  ws.send(JSON.stringify({ type: "execute", category: s.category, args: s.args }));
+}
+
+// ---------------------------------------------------------------------------
 // Combined view
 // ---------------------------------------------------------------------------
-function getAllFlights(): Flight[] {
-  const all: Flight[] = [];
+function getAllItems(): any[] {
+  const all: any[] = [];
   for (const [id, data] of sourceData) {
-    const flights = data.flights || [];
-    // Skip calendar data (skyscanner) and link-only (despegar)
-    if (flights.length === 0) continue;
-    if (flights[0].date != null) continue;
+    // Look for the first array property (flights, hotels, etc.)
+    const itemsKey = Object.keys(data).find((k) => Array.isArray(data[k]) && data[k].length > 0);
+    if (!itemsKey) continue;
 
     const siteName = data.site || id.split("/")[1] || "";
-    for (const f of flights) {
-      all.push({ ...f, _source: siteName, _url: data.url });
+    for (const item of data[itemsKey]) {
+      all.push({ ...item, _source: siteName, _url: data.url });
     }
   }
   all.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity));
@@ -160,7 +240,6 @@ function getAllFlights(): Flight[] {
 }
 
 function renderCombinedView() {
-  // Hide source sections, show combined container
   for (const section of sections.values()) {
     section.style.display = "none";
   }
@@ -174,20 +253,8 @@ function renderCombinedView() {
   }
   combinedEl.style.display = "";
 
-  const flights = getAllFlights();
+  const flights = getAllItems();
   renderCombined(flights, combinedEl);
-
-  // Also show skyscanner/despegar sections below
-  for (const [id, section] of sections) {
-    const data = sourceData.get(id);
-    if (!data) continue;
-    const flights = data.flights || [];
-    const isCalendar = flights.length > 0 && flights[0].date != null;
-    const isLinkOnly = data.note && flights.length === 0;
-    if (isCalendar || isLinkOnly) {
-      section.style.display = "";
-    }
-  }
 }
 
 function renderBySourceView() {
@@ -198,8 +265,9 @@ function renderBySourceView() {
     section.style.display = "";
     const data = sourceData.get(id);
     if (data) {
+      const category = id.split("/")[0] || "";
       const body = section.querySelector(".source-body") as HTMLElement;
-      if (body) renderSkillData("flights", data, body);
+      if (body) renderSkillData(category, data, body);
     }
   }
 }
@@ -288,7 +356,7 @@ function updateFilterLabels() {
   durationLabelEl.textContent = dMax >= durationRange.max ? "Any" : `${Math.floor(dMax / 60)}h ${dMax % 60}m`;
 }
 
-let stopsFilter = "any"; // "any" | "0" | "1" | "2"
+let stopsFilter = "any";
 
 function applyFilters() {
   const pMin = parseInt(priceMinEl.value);
@@ -322,7 +390,6 @@ priceMinEl.addEventListener("input", applyFilters);
 priceMaxEl.addEventListener("input", applyFilters);
 durationMaxEl.addEventListener("input", applyFilters);
 
-// Stops filter buttons
 document.querySelectorAll(".stop-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".stop-btn").forEach((b) => b.classList.remove("active"));

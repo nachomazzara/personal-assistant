@@ -16,11 +16,9 @@ export interface Flight {
   returnDuration?: string;
   returnAirline?: string;
   returnStops?: number;
-  // skyscanner
-  date?: string;
-  priceGroup?: string;
   // added by app.ts when pooling
   _source?: string;
+  _sources?: string[];
   _url?: string;
 }
 
@@ -33,7 +31,124 @@ export interface FlightData {
   error?: string;
 }
 
-// Render flights inside a source section (by-source mode)
+// ---------------------------------------------------------------------------
+// Airline name normalization
+// ---------------------------------------------------------------------------
+const AIRLINE_NAMES: Record<string, string> = {
+  // Normalize casing and abbreviations
+  "avianca": "Avianca",
+  "copa airlines": "Copa Airlines",
+  "copa": "Copa Airlines",
+  "latam airlines": "LATAM",
+  "latam": "LATAM",
+  "la": "LATAM",
+  "american airlines": "American Airlines",
+  "american": "American Airlines",
+  "aa": "American Airlines",
+  "delta air lines": "Delta",
+  "delta": "Delta",
+  "dl": "Delta",
+  "united airlines": "United Airlines",
+  "united": "United Airlines",
+  "ua": "United Airlines",
+  "gol linhas aereas": "GOL",
+  "gol": "GOL",
+  "g3": "GOL",
+  "aerolineas argentinas": "Aerolíneas Argentinas",
+  "aerolíneas argentinas": "Aerolíneas Argentinas",
+  "ar": "Aerolíneas Argentinas",
+  "turkish airlines": "Turkish Airlines",
+  "tk": "Turkish Airlines",
+  "lufthansa": "Lufthansa",
+  "lh": "Lufthansa",
+  "ita airways": "ITA Airways",
+  "ita": "ITA Airways",
+  "air europa": "Air Europa",
+  "ux": "Air Europa",
+  "iberia": "Iberia",
+  "ib": "Iberia",
+  "qatar airways": "Qatar Airways",
+  "qatar": "Qatar Airways",
+  "qr": "Qatar Airways",
+  "sky airline": "Sky Airline",
+  "h2": "Sky Airline",
+  "jetsmart": "JetSmart",
+  "ja": "JetSmart",
+  "arajet": "Arajet",
+  "dm": "Arajet",
+  "aeromexico": "Aeroméxico",
+  "am": "Aeroméxico",
+  "air canada": "Air Canada",
+  "ac": "Air Canada",
+  "emirates": "Emirates",
+  "ek": "Emirates",
+  "british airways": "British Airways",
+  "ba": "British Airways",
+  "klm": "KLM",
+  "air france": "Air France",
+  "af": "Air France",
+  "tap portugal": "TAP Portugal",
+  "tap": "TAP Portugal",
+  "tp": "TAP Portugal",
+  "world ticket": "World Ticket",
+  "w1": "World Ticket",
+  "x1": "X1",
+};
+
+function normalizeAirline(name: string): string {
+  if (!name) return name;
+  const key = name.toLowerCase().trim();
+  return AIRLINE_NAMES[key] || name;
+}
+
+// ---------------------------------------------------------------------------
+// Dedup: merge same flights from different sources, keep cheapest
+// ---------------------------------------------------------------------------
+function dedupFlights(flights: Flight[]): Flight[] {
+  const groups = new Map<string, Flight[]>();
+
+  for (const f of flights) {
+    // Normalize before dedup
+    f.airline = normalizeAirline(f.airline || "");
+    if (f.returnAirline) f.returnAirline = normalizeAirline(f.returnAirline);
+
+    const key = [
+      f.airline,
+      f.departure,
+      f.arrival,
+      f.durationMin || 0,
+    ].join("|");
+
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key)!.push(f);
+  }
+
+  const deduped: Flight[] = [];
+  for (const group of groups.values()) {
+    // Sort by price, keep cheapest
+    group.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity));
+    const best = { ...group[0] };
+
+    // Collect all sources
+    const sources = new Set<string>();
+    for (const f of group) {
+      if (f._source) sources.add(f._source);
+    }
+    best._sources = [...sources];
+    best._source = [...sources].join(", ");
+
+    deduped.push(best);
+  }
+
+  deduped.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity));
+  return deduped;
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
 export function renderFlights(data: FlightData, container: HTMLElement): void {
   if (data.error && !data.flights?.length) {
     container.innerHTML = `<div class="source-error">${data.error}</div>`;
@@ -45,48 +160,53 @@ export function renderFlights(data: FlightData, container: HTMLElement): void {
     return;
   }
 
-  const flights = data.flights || [];
+  const flights = (data.flights || []).map((f) => ({
+    ...f,
+    airline: normalizeAirline(f.airline || ""),
+    returnAirline: f.returnAirline ? normalizeAirline(f.returnAirline) : f.returnAirline,
+  }));
+
   if (flights.length === 0) {
     container.innerHTML = `<div class="source-error">No flights found</div>`;
     return;
   }
 
-  if (flights[0].date != null) {
-    renderCalendar(flights, container);
-  } else {
-    container.innerHTML = renderCards(flights, false);
-  }
+  container.innerHTML = renderCards(flights, false);
 }
 
-// Render a combined list (all-sources mode)
 export function renderCombined(flights: Flight[], container: HTMLElement): void {
   if (flights.length === 0) {
     container.innerHTML = `<div class="source-error">No flights found</div>`;
     return;
   }
-  container.innerHTML = renderCards(flights, true);
+  const deduped = dedupFlights(flights);
+  container.innerHTML = `
+    <div class="combined-header">${deduped.length} unique flights (from ${flights.length} total)</div>
+    ${renderCards(deduped, true)}
+  `;
 }
 
 function isMultiAirline(f: Flight): boolean {
   const name = f.airline || "";
-  if (name.includes(",") || name.includes("+") || name.includes("/")) return true;
-  // Check if stop cities imply different operating carriers (heuristic)
-  if ((f.stops || 0) >= 1 && f.provider) return false; // provider doesn't mean multi-airline
-  return false;
+  return name.includes(",") || name.includes("+") || name.includes("/");
 }
 
 function renderCards(flights: Flight[], showSource: boolean): string {
   return flights.map((f) => {
+    const layoverInfo = f.layovers?.length
+      ? `<br><span class="flight-layover">${f.stopCities?.map((c, i) => `${c} ${f.layovers![i] || ""}`).join(", ") || f.layovers.join(", ")}</span>`
+      : f.stopCities?.length ? `<br><span class="flight-layover">${f.stopCities.join(", ")}</span>` : "";
+
     const stopsText = f.stops === 0
       ? `<span class="flight-stops nonstop">Direct</span>`
-      : `<span class="flight-stops">${f.stops} stop${f.stops! > 1 ? "s" : ""}${f.stopCities?.length ? ` (${f.stopCities.join(", ")})` : ""}</span>`;
+      : `<span class="flight-stops">${f.stops} stop${f.stops! > 1 ? "s" : ""}${layoverInfo}</span>`;
 
     const providerText = f.provider
       ? `<span class="flight-provider">via ${f.provider}</span>`
       : "";
 
     const sourceTag = showSource && f._source
-      ? `<span class="flight-source-tag">${f._source}</span>`
+      ? (f._sources || [f._source]).map((s) => `<span class="flight-source-tag">${s}</span>`).join(" ")
       : "";
 
     const multiTag = isMultiAirline(f)
@@ -128,25 +248,4 @@ function renderCards(flights: Flight[], showSource: boolean): string {
       </div>
     `;
   }).join("");
-}
-
-function renderCalendar(flights: Flight[], container: HTMLElement): void {
-  const html = flights.map((f) => {
-    const date = f.date || "";
-    const formatted = date ? new Date(date + "T00:00:00").toLocaleDateString("en-US", {
-      weekday: "short", month: "short", day: "numeric"
-    }) : "—";
-
-    const groupClass = f.priceGroup === "low" ? "tag-low" : f.priceGroup === "high" ? "tag-high" : "tag-mid";
-
-    return `
-      <div class="calendar-card" data-price="${f.priceRaw || 0}" data-duration="0">
-        <div class="calendar-price">${f.price || "—"}</div>
-        <div class="calendar-date">${formatted}</div>
-        <span class="calendar-tag ${groupClass}">${f.priceGroup || ""}</span>
-      </div>
-    `;
-  }).join("");
-
-  container.innerHTML = `<div class="calendar-grid">${html}</div>`;
 }

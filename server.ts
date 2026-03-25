@@ -4,6 +4,7 @@ import { join, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { Orchestrator } from "./orchestrator.js";
+import { routePrompt } from "./router.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = join(ROOT, "web");
@@ -18,7 +19,6 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
 };
 
-// Static file server — no caching in dev
 const server = createServer((req, res) => {
   const url = req.url === "/" ? "/index.html" : req.url!;
   const distPath = join(DIST_DIR, url);
@@ -32,14 +32,10 @@ const server = createServer((req, res) => {
   }
 
   const mime = MIME[extname(filePath)] || "application/octet-stream";
-  res.writeHead(200, {
-    "Content-Type": mime,
-    "Cache-Control": "no-store",
-  });
+  res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store" });
   res.end(readFileSync(filePath));
 });
 
-// WebSocket server — two paths: /ws for app, /livereload for hot reload
 const wss = new WebSocketServer({ noServer: true });
 const liveReloadWss = new WebSocketServer({ noServer: true });
 
@@ -51,12 +47,9 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
-// Live reload — watch web/ and web/dist/ for changes
 function notifyReload() {
   for (const client of liveReloadWss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send("reload");
-    }
+    if (client.readyState === WebSocket.OPEN) client.send("reload");
   }
 }
 
@@ -69,67 +62,82 @@ function onFileChange() {
 watch(WEB_DIR, { recursive: false }, onFileChange);
 if (existsSync(DIST_DIR)) watch(DIST_DIR, { recursive: false }, onFileChange);
 
-// App WebSocket
+// ---------------------------------------------------------------------------
+// WebSocket — two-step flow
+// ---------------------------------------------------------------------------
 let running = false;
+
+const send = (ws: WebSocket, data: any) => {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+};
 
 wss.on("connection", (ws: WebSocket) => {
   console.error("[server] Client connected");
 
   ws.on("message", async (raw: Buffer) => {
-    let msg: { type: string; text?: string };
+    let msg: { type: string; text?: string; category?: string; args?: Record<string, string> };
     try {
       msg = JSON.parse(raw.toString());
     } catch {
-      ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+      send(ws, { type: "error", message: "Invalid JSON" });
       return;
     }
 
-    if (msg.type !== "prompt" || !msg.text) {
-      ws.send(JSON.stringify({ type: "error", message: "Expected { type: 'prompt', text: '...' }" }));
-      return;
-    }
-
-    if (running) {
-      ws.send(JSON.stringify({ type: "error", message: "A search is already running" }));
-      return;
-    }
-
-    running = true;
-    console.error(`[server] Prompt: ${msg.text.slice(0, 100)}`);
-
-    try {
-      const orchestrator = new Orchestrator();
-
-      orchestrator.on("skill:start", (e) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "skill:start", ...e }));
-        }
-      });
-
-      orchestrator.on("skill:done", (e) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "skill:done", ...e }));
-        }
-      });
-
-      orchestrator.on("skill:error", (e) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "skill:error", ...e }));
-        }
-      });
-
-      const results = await orchestrator.run(msg.text);
-
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "done", results }));
+    // Step 1: User sends a prompt → route it and return suggestions
+    if (msg.type === "prompt" && msg.text) {
+      if (running) {
+        send(ws, { type: "error", message: "A search is already running" });
+        return;
       }
-    } catch (err) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "error", message: (err as Error).message }));
+
+      console.error(`[server] Prompt: ${msg.text.slice(0, 100)}`);
+      send(ws, { type: "routing" });
+
+      try {
+        const result = await routePrompt(msg.text);
+        console.error(`[server] Suggestions: ${result.suggestions.map((s) => s.label).join(", ")}`);
+        send(ws, { type: "suggestions", suggestions: result.suggestions });
+      } catch (err) {
+        send(ws, { type: "error", message: (err as Error).message });
       }
-    } finally {
-      running = false;
+      return;
     }
+
+    // Step 2: User selects a suggestion → run the orchestrator
+    if (msg.type === "execute" && msg.category && msg.args) {
+      if (running) {
+        send(ws, { type: "error", message: "A search is already running" });
+        return;
+      }
+
+      running = true;
+      console.error(`[server] Execute: ${msg.category} → ${JSON.stringify(msg.args)}`);
+
+      try {
+        const orchestrator = new Orchestrator();
+
+        orchestrator.on("skill:start", (e) => send(ws, { type: "skill:start", ...e }));
+        orchestrator.on("skill:update", (e) => send(ws, { type: "skill:update", ...e }));
+        orchestrator.on("skill:done", (e) => {
+          if (e.data?.error) console.error(`[server] skill:done with error ${e.category}/${e.skill}: ${e.data.error}`);
+          send(ws, { type: "skill:done", ...e });
+        });
+        orchestrator.on("skill:error", (e) => {
+          console.error(`[server] skill:error ${e.category}/${e.skill}: ${e.error}`);
+          send(ws, { type: "skill:error", ...e });
+        });
+
+        const results = await orchestrator.run(msg.category, msg.args);
+        send(ws, { type: "done", results });
+      } catch (err) {
+        send(ws, { type: "error", message: (err as Error).message });
+      } finally {
+        running = false;
+      }
+      return;
+    }
+
+    send(ws, { type: "error", message: "Unknown message type" });
   });
 
   ws.on("close", () => console.error("[server] Client disconnected"));

@@ -1,27 +1,15 @@
-import {
-  createAgentSession,
-  SessionManager,
-  SettingsManager,
-  DefaultResourceLoader,
-  AuthStorage,
-  ModelRegistry,
-  createCodingTools,
-} from "@mariozechner/pi-coding-agent";
+import { spawn } from "node:child_process";
 import { readdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
+import { createInterface } from "node:readline";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-export interface CategoryConfig {
-  description: string;
-  maxConcurrent: number;
-}
-
 export interface Skill {
   name: string;
   dir: string;
@@ -36,25 +24,30 @@ export interface SkillResult {
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
-function discoverCategories() {
-  const skillsDir = join(ROOT, "skills");
-  if (!existsSync(skillsDir)) return [];
+interface CategoryConfig {
+  maxConcurrent?: number;
+  requiredFields?: string[];
+  items?: string;
+  [key: string]: unknown;
+}
 
-  return readdirSync(skillsDir, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && existsSync(join(skillsDir, d.name, "config.json")))
-    .map((d) => {
-      const config: CategoryConfig = JSON.parse(
-        readFileSync(join(skillsDir, d.name, "config.json"), "utf-8")
-      );
-      const skills = readdirSync(join(skillsDir, d.name), { withFileTypes: true })
-        .filter((s) => s.isDirectory() && existsSync(join(skillsDir, d.name, s.name, "SKILL.md")))
-        .map((s) => ({ name: s.name, dir: join("skills", d.name, s.name), category: d.name }));
-      return { name: d.name, config, skills };
-    });
+function readCategoryConfig(category: string): CategoryConfig {
+  const configPath = join(ROOT, "skills", category, "config.json");
+  if (!existsSync(configPath)) return {};
+  return JSON.parse(readFileSync(configPath, "utf-8"));
+}
+
+function discoverSkills(category: string): Skill[] {
+  const catDir = join(ROOT, "skills", category);
+  if (!existsSync(catDir)) return [];
+
+  return readdirSync(catDir, { withFileTypes: true })
+    .filter((s) => s.isDirectory() && existsSync(join(catDir, s.name, "SKILL.md")))
+    .map((s) => ({ name: s.name, dir: join("skills", category, s.name), category }));
 }
 
 // ---------------------------------------------------------------------------
-// Script extraction
+// Script extraction — pulls code from SKILL.md ## Script block
 // ---------------------------------------------------------------------------
 function extractScripts(skills: Skill[]) {
   for (const skill of skills) {
@@ -72,168 +65,135 @@ function extractScripts(skills: Skill[]) {
 }
 
 // ---------------------------------------------------------------------------
-// Auth
+// Direct script execution with streaming
 // ---------------------------------------------------------------------------
-export function initAuth(): AuthStorage {
-  const authPath = join(ROOT, ".auth.json");
-  if (!existsSync(authPath)) {
-    const token = process.env.ANTHROPIC_OAUTH_REFRESH_TOKEN;
-    if (!token) throw new Error("No auth. Set ANTHROPIC_OAUTH_REFRESH_TOKEN or create .auth.json");
-    writeFileSync(authPath, JSON.stringify({
-      anthropic: { type: "oauth", refresh: token, access: "", expires: 0 },
-    }));
-  }
-  return AuthStorage.create(authPath);
-}
-
-// ---------------------------------------------------------------------------
-// Extract JSON from agent response
-// ---------------------------------------------------------------------------
-function extractJSON(text: string): Record<string, unknown> {
-  const trimmed = text.trim();
-
-  // Try raw parse
-  try { return JSON.parse(trimmed); } catch {}
-
-  // Try fenced code block
-  const fenced = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  if (fenced) try { return JSON.parse(fenced[1].trim()); } catch {}
-
-  // Try to find a JSON object that starts with {"site" or {"error" or {"skipped" or {"url"
-  const jsonPattern = trimmed.match(/(\{"(?:site|error|skipped|url|flights)[\s\S]*\})\s*$/);
-  if (jsonPattern) try { return JSON.parse(jsonPattern[1]); } catch {}
-
-  // Last resort: find first { to last }
-  const first = trimmed.indexOf("{");
-  const last = trimmed.lastIndexOf("}");
-  if (first !== -1 && last > first) {
-    try { return JSON.parse(trimmed.slice(first, last + 1)); } catch {}
-  }
-
-  return { error: "Could not parse agent response", raw: trimmed.slice(0, 500) };
-}
-
-// ---------------------------------------------------------------------------
-// Orchestrator
-// ---------------------------------------------------------------------------
-const SYSTEM_PROMPT = readFileSync(join(ROOT, "prompts", "system.md"), "utf-8").trim();
-
-export class Orchestrator extends EventEmitter {
-  private authStorage: AuthStorage;
-  private modelRegistry: ModelRegistry;
-  private model: ReturnType<ModelRegistry["find"]>;
-
-  constructor(opts: { model?: string } = {}) {
-    super();
-    this.authStorage = initAuth();
-    this.modelRegistry = new ModelRegistry(this.authStorage);
-    const modelId = opts.model || process.env.MODEL || "claude-sonnet-4-6";
-    this.model = this.modelRegistry.find("anthropic", modelId);
-    if (!this.model) throw new Error(`Model "anthropic/${modelId}" not found`);
-  }
-
-  async run(prompt: string): Promise<SkillResult[]> {
-    const categories = discoverCategories();
-    if (categories.length === 0) throw new Error("No skill categories found");
-
-    const results: SkillResult[] = [];
-
-    for (const { config, skills, name } of categories) {
-      extractScripts(skills);
-      console.error(`[orchestrator] "${name}": ${skills.length} skills, max ${config.maxConcurrent} concurrent`);
-
-      for (let i = 0; i < skills.length; i += config.maxConcurrent) {
-        const batch = skills.slice(i, i + config.maxConcurrent);
-        const batchResults = await Promise.all(
-          batch.map((skill) => this.runSkill(skill, prompt))
-        );
-        results.push(...batchResults.filter((r): r is SkillResult => r !== null));
-      }
-    }
-
-    this.emit("done", { results });
-    return results;
-  }
-
-  private async runSkill(skill: Skill, prompt: string): Promise<SkillResult | null> {
+function runScriptDirect(
+  skill: Skill,
+  args: Record<string, string>,
+  onUpdate: (data: SkillResult) => void,
+  config: CategoryConfig = {},
+): Promise<SkillResult> {
+  return new Promise((resolve) => {
     const source = `${skill.category}/${skill.name}`;
-    this.emit("skill:start", { category: skill.category, skill: skill.name });
+    const scriptPath = join(ROOT, skill.dir, "search.mjs");
 
-    try {
-      const text = await this.runSkillAgent(skill, prompt);
-      const data = extractJSON(text);
-
-      if (data.error && data.raw) {
-        console.error(`[orchestrator] ${source} parse failed, raw: ${String(data.raw).slice(0, 300)}`);
-      }
-
-      if (data.skipped) return null;
-
-      const result = { source, ...data } as SkillResult;
-      this.emit("skill:done", { category: skill.category, skill: skill.name, data: result });
-      return result;
-    } catch (err) {
-      const error = (err as Error).message;
-      console.error(`[orchestrator] ${source} exception: ${error}`);
-      this.emit("skill:error", { category: skill.category, skill: skill.name, error });
-      return { source, error } as SkillResult;
+    if (!existsSync(scriptPath)) {
+      resolve({ source, error: "Script not found" });
+      return;
     }
-  }
 
-  private async runSkillAgent(skill: Skill, prompt: string): Promise<string> {
-    const resourceLoader = new DefaultResourceLoader({
-      cwd: ROOT,
-      additionalSkillPaths: [join(ROOT, skill.dir)],
-      systemPrompt: SYSTEM_PROMPT,
-      noExtensions: true,
-      noPromptTemplates: true,
-      noThemes: true,
-    });
-    await resourceLoader.reload();
+    const cliArgs: string[] = [];
+    for (const [k, v] of Object.entries(args)) {
+      cliArgs.push(`--${k}`, v);
+    }
 
-    const { session } = await createAgentSession({
+    const child = spawn("node", [scriptPath, ...cliArgs], {
       cwd: ROOT,
-      authStorage: this.authStorage,
-      modelRegistry: this.modelRegistry,
-      model: this.model!,
-      sessionManager: SessionManager.inMemory(),
-      settingsManager: SettingsManager.inMemory(),
-      resourceLoader,
-      tools: createCodingTools(ROOT),
+      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 120_000,
     });
 
-    try {
-      const label = `${skill.category}/${skill.name}`;
-      console.error(`[orchestrator] Starting ${label}...`);
-      await session.prompt(prompt);
-      let text = session.getLastAssistantText() || "";
+    let lastResult: SkillResult | null = null;
+    let stderr = "";
 
-      // Self-correction: if the response isn't valid JSON, nudge the agent in the same session
-      const MAX_CORRECTIONS = 2;
-      for (let i = 0; i < MAX_CORRECTIONS; i++) {
-        const trimmed = text.trim();
-        // Try to parse as-is
-        try { JSON.parse(trimmed); break; } catch {}
-        // Try extracting from code fence
-        const fenced = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-        if (fenced) try { JSON.parse(fenced[1].trim()); break; } catch {}
-        // Try first { to last }
-        const first = trimmed.indexOf("{"), last = trimmed.lastIndexOf("}");
-        if (first !== -1 && last > first) try { JSON.parse(trimmed.slice(first, last + 1)); break; } catch {}
+    const rl = createInterface({ input: child.stdout! });
+    rl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) return;
+      try {
+        const data = JSON.parse(trimmed);
+        const result = { source, ...data } as SkillResult;
+        lastResult = result;
+        if (data.partial) onUpdate(result);
+      } catch {}
+    });
 
-        console.error(`[orchestrator] ${label} returned non-JSON (correction ${i + 1}), nudging...`);
-        console.error(`[orchestrator] response was: ${trimmed.slice(0, 150)}`);
-        await session.prompt(
-          "ERROR: Your response is not valid JSON. Your output goes directly to a JSON parser. " +
-          "Return ONLY the raw JSON from the command stdout. No text, no markdown, no code fences. Just the JSON object starting with { and ending with }."
-        );
-        text = session.getLastAssistantText() || "";
+    child.stderr?.on("data", (chunk) => {
+      const msg = chunk.toString();
+      stderr += msg;
+      process.stderr.write(`[${skill.name}] ${msg}`);
+    });
+
+    child.on("close", (code) => {
+      if (lastResult && !lastResult.error) {
+        // Sanity check: validate required fields from config
+        const required = config.requiredFields || [];
+        const itemsKey = config.items || "items";
+        const items = (lastResult as any)[itemsKey];
+        if (required.length > 0 && Array.isArray(items) && items.length > 0) {
+          const isMissing = (v: any) => v === undefined || v === null || v === "";
+          const isNumericField = (k: string) => required.includes(k) && typeof items.find((i: any) => i[k] !== undefined)?.[k] === "number";
+          const broken = items.filter((item: any) =>
+            required.some((k) => isNumericField(k) ? (item[k] === undefined || item[k] === null) : isMissing(item[k]))
+          );
+          const brokenPct = broken.length / items.length;
+          if (brokenPct > 0.5) {
+            console.error(`[orchestrator] ${source}: ${broken.length}/${items.length} items missing required fields`);
+            resolve({ source, error: `${Math.round(brokenPct * 100)}% missing required fields`, [itemsKey]: items, stderr: stderr.slice(-500) });
+            return;
+          }
+          if (broken.length > 0) {
+            console.error(`[orchestrator] ${source}: filtered ${broken.length} incomplete items`);
+            (lastResult as any)[itemsKey] = items.filter((item: any) =>
+              !required.some((k) => isNumericField(k) ? (item[k] === undefined || item[k] === null) : isMissing(item[k]))
+            );
+          }
+        }
+        resolve(lastResult);
+      } else if (code !== 0) {
+        const lastLine = stderr.trim().split("\n").pop() || "";
+        console.error(`[orchestrator] ${source} FAILED (code ${code}): ${lastLine}`);
+        resolve({ source, error: `Script failed: ${lastLine || `exit code ${code}`}` });
+      } else {
+        const lastLine = stderr.trim().split("\n").pop() || "";
+        console.error(`[orchestrator] ${source} NO OUTPUT: ${lastLine}`);
+        resolve({ source, error: `No results: ${lastLine || "script produced no output"}` });
       }
+    });
 
-      console.error(`[orchestrator] ${label} done (${text.length} chars)`);
-      return text;
-    } finally {
-      session.dispose();
+    child.on("error", (err) => {
+      resolve({ source, error: err.message });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator — pure execution, no routing logic
+// ---------------------------------------------------------------------------
+export class Orchestrator extends EventEmitter {
+  async run(category: string, args: Record<string, string>): Promise<SkillResult[]> {
+    const skills = discoverSkills(category);
+    if (skills.length === 0) throw new Error(`No skills found for category: ${category}`);
+
+    const config = readCategoryConfig(category);
+    const maxConcurrent = config.maxConcurrent || skills.length;
+    extractScripts(skills);
+    console.error(`[orchestrator] "${category}": ${skills.length} skills, max ${maxConcurrent} concurrent`);
+
+    const allResults: SkillResult[] = [];
+    for (let i = 0; i < skills.length; i += maxConcurrent) {
+      const batch = skills.slice(i, i + maxConcurrent);
+      const batchResults = await Promise.all(batch.map((skill) => {
+        const source = `${skill.category}/${skill.name}`;
+        console.error(`[orchestrator] ${source}: direct script (0 tokens)`);
+        this.emit("skill:start", { category: skill.category, skill: skill.name });
+
+        return runScriptDirect(skill, args, (partial) => {
+          this.emit("skill:update", { category: skill.category, skill: skill.name, data: partial });
+        }, config).then((result) => {
+          this.emit("skill:done", { category: skill.category, skill: skill.name, data: result });
+          return result;
+        }).catch((err) => {
+          const error = (err as Error).message;
+          this.emit("skill:error", { category: skill.category, skill: skill.name, error });
+          return { source, error } as SkillResult;
+        });
+      }));
+      allResults.push(...batchResults.filter((r): r is SkillResult => r !== null));
     }
+
+    this.emit("done", { results: allResults });
+    return allResults;
   }
 }

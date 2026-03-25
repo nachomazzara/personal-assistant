@@ -31,7 +31,7 @@ import rebrowser from 'rebrowser-puppeteer'
 const args = process.argv.slice(2)
 const getArg = (n) => { const i = args.indexOf(`--${n}`); return i !== -1 && args[i + 1] ? args[i + 1] : null }
 const from = getArg('from'), to = getArg('to'), departure = getArg('departure'), returnDate = getArg('return')
-const MAX = 50, wait = (ms) => new Promise(r => setTimeout(r, ms))
+const wait = (ms) => new Promise(r => setTimeout(r, ms))
 
 if (!from || !to || !departure) { console.error('Usage: search.mjs --from IATA --to IATA --departure YYYY-MM-DD [--return YYYY-MM-DD]'); process.exit(1) }
 
@@ -147,80 +147,77 @@ try {
     if (acceptBtn) { await acceptBtn.click(); await wait(2000) }
   } catch {}
 
-  // Wait for API responses — Skyscanner polls progressively
+  function buildFlights() {
+    const biggest = [...apiResponses].sort((a, b) => b.length - a.length)[0]
+    if (!biggest) return []
+    try {
+      const data = JSON.parse(biggest)
+      const results = data.itineraries?.results || []
+      const agents = data.itineraries?.agents || {}
+      const fmtTime = (t) => t ? t.slice(11, 16) : ''
+      const flights = [], seen = new Set()
+      for (const r of results) {
+        const priceEur = r.price?.raw
+        if (!priceEur) continue
+        const priceRaw = Math.round(priceEur * EUR_TO_USD)
+        const leg0 = r.legs?.[0]
+        if (!leg0) continue
+        const airline = leg0.carriers?.marketing?.[0]?.name || ''
+        const dep = fmtTime(leg0.departure), arr = fmtTime(leg0.arrival)
+        const duration = leg0.durationInMinutes || 0
+        const stops = leg0.stopCount ?? 0
+        const stopCities = (leg0.segments || []).slice(0, -1).map(s => s.destination?.displayCode).filter(Boolean)
+        const dedupKey = `${airline}|${dep}|${arr}|${duration}`
+        if (seen.has(dedupKey)) continue
+        seen.add(dedupKey)
+        const flight = {
+          price: `$${priceRaw}`, priceRaw, airline, departure: dep, arrival: arr,
+          duration: duration > 0 ? `${Math.floor(duration / 60)}h ${duration % 60}m` : '',
+          durationMin: duration, stops, stopCities,
+        }
+        const leg1 = r.legs?.[1]
+        if (leg1) {
+          flight.returnDeparture = fmtTime(leg1.departure)
+          flight.returnArrival = fmtTime(leg1.arrival)
+          flight.returnDuration = leg1.durationInMinutes > 0 ? `${Math.floor(leg1.durationInMinutes / 60)}h ${leg1.durationInMinutes % 60}m` : ''
+          flight.returnAirline = leg1.carriers?.marketing?.[0]?.name || airline
+          flight.returnStops = leg1.stopCount ?? 0
+        }
+        const agentId = r.pricingOptions?.[0]?.agentIds?.[0]
+        if (agentId && agents[agentId]?.name) flight.provider = agents[agentId].name
+        flights.push(flight)
+      }
+      flights.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity))
+      return flights
+    } catch (e) { console.error('Skyscanner: parse error:', e.message); return [] }
+  }
+
+  const skyUrl = url.replace('skyscanner.es', 'skyscanner.com')
+  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Skyscanner', url: skyUrl, flights, partial }))
+
+  // Streaming poll loop
   console.error('Skyscanner: waiting for flight data...')
-  let lastCount = 0
+  let lastFlightCount = 0, lastNewTime = Date.now()
   for (let i = 0; i < 20; i++) {
     await wait(3000)
-    console.error(`Skyscanner: ${apiResponses.length} API responses (${apiResponses.map(d => Math.round(d.length/1024) + 'kb').join(', ')})`)
-    if (apiResponses.length >= 3 && apiResponses.length === lastCount) break
-    lastCount = apiResponses.length
-  }
-
-  console.error(`Skyscanner: parsing ${apiResponses.length} API responses...`)
-
-  const flights = []
-  const seen = new Set()
-
-  // Use the biggest response (most complete data)
-  const biggest = apiResponses.sort((a, b) => b.length - a.length)[0]
-  if (!biggest) { console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [] })); process.exit(0) }
-
-  try {
-    const data = JSON.parse(biggest)
-    const results = data.itineraries?.results || []
-    const agents = data.itineraries?.agents || {}
-    const fmtTime = (t) => t ? t.slice(11, 16) : ''
-
-    for (const r of results) {
-      const priceEur = r.price?.raw
-      if (!priceEur) continue
-      const priceRaw = Math.round(priceEur * EUR_TO_USD)
-
-      const leg0 = r.legs?.[0]
-      if (!leg0) continue
-
-      const airline = leg0.carriers?.marketing?.[0]?.name || ''
-      const dep = fmtTime(leg0.departure)
-      const arr = fmtTime(leg0.arrival)
-      const duration = leg0.durationInMinutes || 0
-      const stops = leg0.stopCount ?? 0
-      const stopCities = (leg0.segments || []).slice(0, -1).map(s => s.destination?.displayCode).filter(Boolean)
-
-      const dedupKey = `${airline}|${dep}|${arr}|${duration}`
-      if (seen.has(dedupKey)) continue
-      seen.add(dedupKey)
-
-      const flight = {
-        price: `$${priceRaw}`, priceRaw, airline,
-        departure: dep, arrival: arr,
-        duration: duration > 0 ? `${Math.floor(duration / 60)}h ${duration % 60}m` : '',
-        durationMin: duration, stops, stopCities,
-      }
-
-      // Return leg
-      const leg1 = r.legs?.[1]
-      if (leg1) {
-        flight.returnDeparture = fmtTime(leg1.departure)
-        flight.returnArrival = fmtTime(leg1.arrival)
-        flight.returnDuration = leg1.durationInMinutes > 0 ? `${Math.floor(leg1.durationInMinutes / 60)}h ${leg1.durationInMinutes % 60}m` : ''
-        flight.returnAirline = leg1.carriers?.marketing?.[0]?.name || airline
-        flight.returnStops = leg1.stopCount ?? 0
-      }
-
-      // Provider from pricing options
-      const agentId = r.pricingOptions?.[0]?.agentIds?.[0]
-      if (agentId && agents[agentId]?.name) flight.provider = agents[agentId].name
-
-      flights.push(flight)
+    const flights = buildFlights()
+    if (flights.length > lastFlightCount) {
+      lastNewTime = Date.now()
+      lastFlightCount = flights.length
+      emit(flights, true)
+      console.error(`Skyscanner: ${flights.length} flights (partial)`)
+    } else if (lastFlightCount > 0 && Date.now() - lastNewTime > 5000) {
+      console.error('Skyscanner: no new flights for 5s, stopping')
+      break
     }
-  } catch (e) {
-    console.error('Skyscanner: parse error:', e.message)
   }
 
-  flights.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity))
-  console.error(`Skyscanner: ${flights.length} flights parsed`)
-  console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: flights.slice(0, MAX) }))
+  const finalFlights = buildFlights()
+  console.error(`Skyscanner: ${finalFlights.length} flights final`)
+  emit(finalFlights, false)
+} catch (e) {
+  console.error('Skyscanner: error:', e.message)
+  console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], error: e.message, partial: false }))
 } finally {
   await browser.close()
 }

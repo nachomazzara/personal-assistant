@@ -29,7 +29,7 @@ puppeteerExtra.use(StealthPlugin())
 const args = process.argv.slice(2)
 const getArg = (n) => { const i = args.indexOf(`--${n}`); return i !== -1 && args[i + 1] ? args[i + 1] : null }
 const from = getArg('from'), to = getArg('to'), departure = getArg('departure'), returnDate = getArg('return')
-const MAX = 50, wait = (ms) => new Promise(r => setTimeout(r, ms))
+const wait = (ms) => new Promise(r => setTimeout(r, ms))
 
 if (!from || !to || !departure) { console.error('Usage: search.mjs --from IATA --to IATA --departure YYYY-MM-DD [--return YYYY-MM-DD]'); process.exit(1) }
 
@@ -53,21 +53,25 @@ function parseResponse(raw) {
     if (!flightDataStr) return results
     const flightData = JSON.parse(flightDataStr)
 
+    const fmtTime = (t) => (Array.isArray(t) && typeof t[0] === 'number' && typeof t[1] === 'number') ? `${String(t[0]).padStart(2, '0')}:${String(t[1]).padStart(2, '0')}` : ''
+
     function extractOffers(arr, d = 0) {
-      if (d > 6 || results.length >= MAX || !Array.isArray(arr)) return
+      if (d > 6 || !Array.isArray(arr)) return
       for (const item of arr) {
         if (!Array.isArray(item)) continue
         if (item.length >= 2 && Array.isArray(item[0]) && Array.isArray(item[1])) {
           const offer = item[0], priceInfo = item[1]
-          if (typeof offer[0] === 'string' && offer[0].length === 2 && Array.isArray(offer[1])) {
+          if (typeof offer[0] === 'string' && offer[0].length <= 3 && Array.isArray(offer[1])) {
             const airlineName = offer[1]?.[0] || offer[0]
             const origin = offer[3], dest = offer[6]
             const depTime = offer[5], arrTime = offer[8]
             const duration = offer[9], stops = offer[10]
-            const price = priceInfo?.[0]?.[1]
-            const stopovers = offer[11] || []
+            // Price: try [null, price] format first, then nested [[null, price]] format
+            const price = (typeof priceInfo[1] === 'number') ? priceInfo[1]
+              : (Array.isArray(priceInfo[0]) && typeof priceInfo[0][1] === 'number') ? priceInfo[0][1]
+              : null
+            const stopovers = offer[13] || offer[11] || []
             if (origin && dest && typeof duration === 'number' && price) {
-              const fmtTime = (t) => (Array.isArray(t) && typeof t[0] === 'number' && typeof t[1] === 'number') ? `${String(t[0]).padStart(2, '0')}:${String(t[1]).padStart(2, '0')}` : ''
               const depStr = fmtTime(depTime)
               const arrStr = fmtTime(arrTime)
               const stopCities = []
@@ -121,18 +125,38 @@ try {
   const query = returnDate ? `flights from ${from} to ${to} on ${dep} returning ${ret}` : `flights from ${from} to ${to} on ${dep} one way`
   const url = `https://www.google.com/travel/flights?q=${encodeURIComponent(query)}&hl=en&curr=USD`
 
+  function buildFlights() {
+    const flights = []
+    for (const call of apiCalls) {
+      for (const f of parseResponse(call)) {
+        if (!flights.some(e => e.priceRaw === f.priceRaw && e.airline === f.airline && e.departure === f.departure)) flights.push(f)
+      }
+    }
+    flights.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity))
+    return flights
+  }
+
+  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Google Flights', url, flights, partial }))
+
   console.error('Google Flights: loading...')
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
   try { const btn = await page.$('button[aria-label="Accept all"], button[id="L2AGLb"]'); if (btn) { await btn.click(); await wait(5000) } } catch {}
 
   // Wait for initial API response
   for (let i = 0; i < 10; i++) { if (apiCalls.length > 0) break; await wait(3000) }
-  console.error(`Google Flights: ${apiCalls.length} initial API calls`)
 
-  // Click "View more flights" repeatedly and wait for new data
-  await wait(5000)
+  // Emit first partial
+  let lastFlightCount = 0
+  let flights = buildFlights()
+  if (flights.length > 0) {
+    emit(flights, true)
+    lastFlightCount = flights.length
+    console.error(`Google Flights: ${flights.length} flights (initial partial)`)
+  }
+
+  // Click "View more flights" and stream updates
+  let lastNewTime = Date.now()
   for (let i = 0; i < 8; i++) {
-    const prev = apiCalls.length
     const clicked = await page.evaluate(() => {
       const btn = document.querySelector('button[aria-label="View more flights"]')
       if (btn && btn.offsetParent) { btn.click(); return true }
@@ -143,21 +167,24 @@ try {
     })
     if (!clicked) break
     await wait(8000)
-    console.error(`Google Flights: ${apiCalls.length} API calls after "View more" click ${i + 1}`)
-  }
-
-  // Final wait for any remaining API responses
-  await wait(5000)
-
-  let flights = []
-  for (const call of apiCalls) {
-    for (const f of parseResponse(call)) {
-      if (!flights.some(e => e.priceRaw === f.priceRaw && e.airline === f.airline && e.departure === f.departure)) flights.push(f)
+    flights = buildFlights()
+    if (flights.length > lastFlightCount) {
+      lastNewTime = Date.now()
+      lastFlightCount = flights.length
+      emit(flights, true)
+      console.error(`Google Flights: ${flights.length} flights after "View more" ${i + 1}`)
+    } else if (Date.now() - lastNewTime > 5000) {
+      console.error('Google Flights: no new flights for 5s, stopping')
+      break
     }
   }
-  flights.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity))
-  console.error(`Google Flights: ${flights.length} flights from ${apiCalls.length} API calls`)
-  console.log(JSON.stringify({ site: 'Google Flights', url, flights: flights.slice(0, MAX) }))
+
+  const finalFlights = buildFlights()
+  console.error(`Google Flights: ${finalFlights.length} flights final from ${apiCalls.length} API calls`)
+  emit(finalFlights, false)
+} catch (e) {
+  console.error('Google Flights: error:', e.message)
+  console.log(JSON.stringify({ site: 'Google Flights', url: '', flights: [], error: e.message, partial: false }))
 } finally {
   await browser.close()
 }

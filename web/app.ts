@@ -1,0 +1,343 @@
+import { renderFlights, renderCombined, type Flight, type FlightData } from "./renderers/flights.js";
+import { renderDefault } from "./renderers/default.js";
+
+// ---------------------------------------------------------------------------
+// Elements
+// ---------------------------------------------------------------------------
+const form = document.getElementById("prompt-form") as HTMLFormElement;
+const input = document.getElementById("prompt-input") as HTMLInputElement;
+const btn = document.getElementById("prompt-btn") as HTMLButtonElement;
+const results = document.getElementById("results") as HTMLElement;
+const filtersEl = document.getElementById("filters") as HTMLElement;
+const priceMinEl = document.getElementById("price-min") as HTMLInputElement;
+const priceMaxEl = document.getElementById("price-max") as HTMLInputElement;
+const durationMaxEl = document.getElementById("duration-max") as HTMLInputElement;
+const priceLabelEl = document.getElementById("price-label") as HTMLElement;
+const durationLabelEl = document.getElementById("duration-label") as HTMLElement;
+const filterCountEl = document.getElementById("filter-count") as HTMLElement;
+const filterResetEl = document.getElementById("filter-reset") as HTMLButtonElement;
+const viewToggle = document.getElementById("view-toggle") as HTMLButtonElement;
+
+// ---------------------------------------------------------------------------
+// Renderers registry
+// ---------------------------------------------------------------------------
+const renderers: Record<string, (data: any, container: HTMLElement) => void> = {
+  flights: renderFlights,
+};
+
+function renderSkillData(category: string, data: any, container: HTMLElement) {
+  const fn = renderers[category] || renderDefault;
+  fn(data, container);
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+let ws: WebSocket;
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => console.log("[ws] connected");
+  ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
+  ws.onclose = () => setTimeout(connect, 2000);
+}
+
+connect();
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const sections = new Map<string, HTMLElement>();
+const sourceData = new Map<string, FlightData>(); // accumulated data per skill
+let viewMode: "by-source" | "combined" = "by-source";
+let durationRange = { max: 2000 };
+
+// ---------------------------------------------------------------------------
+// Message handler
+// ---------------------------------------------------------------------------
+function handleMessage(msg: any) {
+  switch (msg.type) {
+    case "skill:start": {
+      const id = `${msg.category}/${msg.skill}`;
+      const section = document.createElement("div");
+      section.className = "source-section";
+      section.dataset.id = id;
+      section.innerHTML = `
+        <div class="source-header">
+          <span class="status loading"></span>
+          <span>${msg.skill}</span>
+        </div>
+        <div class="source-body">
+          <div class="skeleton"></div>
+          <div class="skeleton"></div>
+          <div class="skeleton"></div>
+        </div>
+      `;
+      results.appendChild(section);
+      sections.set(id, section);
+      break;
+    }
+
+    case "skill:done": {
+      const id = `${msg.category}/${msg.skill}`;
+      const section = sections.get(id);
+      if (!section) break;
+
+      const status = section.querySelector(".status")!;
+      status.classList.remove("loading");
+      status.classList.add("done");
+
+      if (msg.data?.url) {
+        const header = section.querySelector(".source-header")!;
+        const link = document.createElement("a");
+        link.href = msg.data.url;
+        link.target = "_blank";
+        link.textContent = "Open ↗";
+        header.appendChild(link);
+      }
+
+      // Store data for combined view
+      const data = msg.data as FlightData;
+      data.site = data.site || msg.skill;
+      sourceData.set(id, data);
+
+      // Render based on current view
+      if (viewMode === "by-source") {
+        const body = section.querySelector(".source-body") as HTMLElement;
+        renderSkillData(msg.category, data, body);
+      } else {
+        renderCombinedView();
+      }
+
+      updateFilterBounds();
+      applyFilters();
+      if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
+      break;
+    }
+
+    case "skill:error": {
+      const id = `${msg.category}/${msg.skill}`;
+      const section = sections.get(id);
+      if (!section) break;
+      const status = section.querySelector(".status")!;
+      status.classList.remove("loading");
+      status.classList.add("error");
+      const body = section.querySelector(".source-body") as HTMLElement;
+      body.innerHTML = `<div class="source-error">${msg.error}</div>`;
+      break;
+    }
+
+    case "done":
+      setLoading(false);
+      break;
+
+    case "error":
+      setLoading(false);
+      results.innerHTML = `<div class="source-error">${msg.message}</div>`;
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Combined view
+// ---------------------------------------------------------------------------
+function getAllFlights(): Flight[] {
+  const all: Flight[] = [];
+  for (const [id, data] of sourceData) {
+    const flights = data.flights || [];
+    // Skip calendar data (skyscanner) and link-only (despegar)
+    if (flights.length === 0) continue;
+    if (flights[0].date != null) continue;
+
+    const siteName = data.site || id.split("/")[1] || "";
+    for (const f of flights) {
+      all.push({ ...f, _source: siteName, _url: data.url });
+    }
+  }
+  all.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity));
+  return all;
+}
+
+function renderCombinedView() {
+  // Hide source sections, show combined container
+  for (const section of sections.values()) {
+    section.style.display = "none";
+  }
+
+  let combinedEl = document.getElementById("combined-results");
+  if (!combinedEl) {
+    combinedEl = document.createElement("div");
+    combinedEl.id = "combined-results";
+    combinedEl.className = "source-section";
+    results.appendChild(combinedEl);
+  }
+  combinedEl.style.display = "";
+
+  const flights = getAllFlights();
+  renderCombined(flights, combinedEl);
+
+  // Also show skyscanner/despegar sections below
+  for (const [id, section] of sections) {
+    const data = sourceData.get(id);
+    if (!data) continue;
+    const flights = data.flights || [];
+    const isCalendar = flights.length > 0 && flights[0].date != null;
+    const isLinkOnly = data.note && flights.length === 0;
+    if (isCalendar || isLinkOnly) {
+      section.style.display = "";
+    }
+  }
+}
+
+function renderBySourceView() {
+  const combinedEl = document.getElementById("combined-results");
+  if (combinedEl) combinedEl.style.display = "none";
+
+  for (const [id, section] of sections) {
+    section.style.display = "";
+    const data = sourceData.get(id);
+    if (data) {
+      const body = section.querySelector(".source-body") as HTMLElement;
+      if (body) renderSkillData("flights", data, body);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// View toggle
+// ---------------------------------------------------------------------------
+viewToggle.addEventListener("click", () => {
+  viewMode = viewMode === "by-source" ? "combined" : "by-source";
+  viewToggle.textContent = viewMode === "combined" ? "By source" : "All combined";
+
+  if (viewMode === "combined") {
+    renderCombinedView();
+  } else {
+    renderBySourceView();
+  }
+
+  updateFilterBounds();
+  applyFilters();
+});
+
+// ---------------------------------------------------------------------------
+// Prompt submission
+// ---------------------------------------------------------------------------
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || ws.readyState !== WebSocket.OPEN) return;
+
+  results.innerHTML = "";
+  sections.clear();
+  sourceData.clear();
+  const combinedEl = document.getElementById("combined-results");
+  if (combinedEl) combinedEl.remove();
+  filtersEl.classList.add("hidden");
+
+  setLoading(true);
+  ws.send(JSON.stringify({ type: "prompt", text }));
+});
+
+function setLoading(loading: boolean) {
+  btn.disabled = loading;
+  input.disabled = loading;
+  if (!loading) input.focus();
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+function getFlightCards(): HTMLElement[] {
+  return Array.from(results.querySelectorAll(".flight-card"));
+}
+
+function updateFilterBounds() {
+  const cards = getFlightCards();
+  let minP = Infinity, maxP = 0, maxD = 0;
+  for (const card of cards) {
+    const p = parseFloat(card.dataset.price || "0");
+    const d = parseFloat(card.dataset.duration || "0");
+    if (p > 0 && p < minP) minP = p;
+    if (p > maxP) maxP = p;
+    if (d > maxD) maxD = d;
+  }
+
+  if (minP === Infinity) minP = 0;
+  durationRange = { max: maxD || 2000 };
+
+  priceMinEl.min = "0";
+  priceMinEl.max = String(maxP);
+  priceMinEl.value = "0";
+  priceMaxEl.min = "0";
+  priceMaxEl.max = String(maxP);
+  priceMaxEl.value = String(maxP);
+  durationMaxEl.min = "0";
+  durationMaxEl.max = String(durationRange.max);
+  durationMaxEl.value = String(durationRange.max);
+
+  updateFilterLabels();
+}
+
+function updateFilterLabels() {
+  const pMin = parseInt(priceMinEl.value);
+  const pMax = parseInt(priceMaxEl.value);
+  const dMax = parseInt(durationMaxEl.value);
+  priceLabelEl.textContent = `$${pMin} – $${pMax}`;
+  durationLabelEl.textContent = dMax >= durationRange.max ? "Any" : `${Math.floor(dMax / 60)}h ${dMax % 60}m`;
+}
+
+let stopsFilter = "any"; // "any" | "0" | "1" | "2"
+
+function applyFilters() {
+  const pMin = parseInt(priceMinEl.value);
+  const pMax = parseInt(priceMaxEl.value);
+  const dMax = parseInt(durationMaxEl.value);
+  const cards = getFlightCards();
+
+  let visible = 0;
+  for (const card of cards) {
+    const p = parseFloat(card.dataset.price || "0");
+    const d = parseFloat(card.dataset.duration || "0");
+    const s = parseInt(card.dataset.stops || "0");
+
+    const priceOk = p === 0 || (p >= pMin && p <= pMax);
+    const durationOk = d === 0 || d <= dMax;
+    const stopsOk = stopsFilter === "any"
+      || (stopsFilter === "0" && s === 0)
+      || (stopsFilter === "1" && s === 1)
+      || (stopsFilter === "2" && s >= 2);
+    const show = priceOk && durationOk && stopsOk;
+
+    card.classList.toggle("filtered", !show);
+    if (show) visible++;
+  }
+
+  filterCountEl.textContent = `${visible} of ${cards.length} flights`;
+  updateFilterLabels();
+}
+
+priceMinEl.addEventListener("input", applyFilters);
+priceMaxEl.addEventListener("input", applyFilters);
+durationMaxEl.addEventListener("input", applyFilters);
+
+// Stops filter buttons
+document.querySelectorAll(".stop-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".stop-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    stopsFilter = (btn as HTMLElement).dataset.stops || "any";
+    applyFilters();
+  });
+});
+
+filterResetEl.addEventListener("click", () => {
+  priceMinEl.value = "0";
+  priceMaxEl.value = priceMaxEl.max;
+  durationMaxEl.value = durationMaxEl.max;
+  stopsFilter = "any";
+  document.querySelectorAll(".stop-btn").forEach((b) => b.classList.remove("active"));
+  document.querySelector('.stop-btn[data-stops="any"]')?.classList.add("active");
+  applyFilters();
+});

@@ -1,0 +1,4 @@
+{
+  "description": "Search for cheap flights across multiple providers",
+  "maxConcurrent": 4
+}

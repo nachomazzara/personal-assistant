@@ -1,0 +1,7 @@
+node_modules/
+dist/
+web/dist/
+.auth.json
+
+# Auto-extracted from SKILL.md by orchestrator
+skills/**/search.mjs

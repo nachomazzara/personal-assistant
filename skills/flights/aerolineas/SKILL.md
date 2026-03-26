@@ -48,6 +48,7 @@ const legParams = retFormatted
   : `leg=${from}-${to}-${depFormatted}`
 // Use es-us locale for USD pricing
 const pageUrl = `https://www.aerolineas.com.ar/es-us/flights-offers?adt=1&inf=0&chd=0&flexDates=false&cabinClass=Economy&flightType=${flightType}&${legParams}`
+const flexApiUrl = `https://api.aerolineas.com.ar/v1/flights/offers?adt=1&inf=0&chd=0&flexDates=true&cabinClass=Economy&flightType=${flightType}&${legParams}`
 const siteUrl = pageUrl
 
 const browser = await puppeteerExtra.launch({
@@ -60,6 +61,16 @@ const browser = await puppeteerExtra.launch({
 try {
   const page = await browser.newPage()
   const apiResponses = []
+  let authToken = null
+  let flexData = null
+
+  let apiHeaders = null
+  page.on('request', (req) => {
+    if (req.url().includes('flights/offers') && req.headers().authorization) {
+      authToken = req.headers().authorization
+      apiHeaders = req.headers()
+    }
+  })
 
   page.on('response', async (res) => {
     const u = res.url()
@@ -79,6 +90,21 @@ try {
     if (apiResponses.length > 0) break
     await wait(3000)
   }
+
+  // Fetch flex calendar data using captured auth token (runs in background)
+  async function fetchFlexDates() {
+    if (!authToken) { console.error('Aerolíneas: no auth token for flex API'); return }
+    try {
+      const headers = { 'Authorization': authToken, 'x-channel-id': apiHeaders?.['x-channel-id'] || 'WEB_US', 'accept-language': apiHeaders?.['accept-language'] || 'es-US' }
+      const resp = await page.evaluate(async (url, hdrs) => {
+        const res = await fetch(url, { headers: hdrs })
+        return await res.text()
+      }, flexApiUrl, headers)
+      if (resp && resp.length > 100) flexData = JSON.parse(resp)
+      console.error(`Aerolíneas: flex calendar fetched (${flexData?.calendarOffers ? 'ok' : 'empty'})`)
+    } catch (e) { console.error('Aerolíneas: flex fetch error:', e.message) }
+  }
+  const flexPromise = fetchFlexDates()
 
   function buildFlights() {
     if (apiResponses.length === 0) return []
@@ -150,7 +176,44 @@ try {
     }
   }
 
-  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Aerolíneas Argentinas', url: siteUrl, flights, partial }))
+  function buildFlexDates() {
+    if (!flexData) return []
+    try {
+      const data = flexData
+      const cal = data.calendarOffers || {}
+      const outbound = (cal['0'] || []).filter(e => !e.soldOut && e.offerDetails?.fare?.total)
+      const returnLeg = (cal['1'] || []).filter(e => !e.soldOut && e.offerDetails?.fare?.total)
+
+      if (returnLeg.length > 0) {
+        // Round trip: combine outbound × return where return date > outbound date
+        const combos = []
+        for (const out of outbound) {
+          for (const ret of returnLeg) {
+            if (ret.departure > out.departure) {
+              combos.push({
+                departure: out.departure,
+                return: ret.departure,
+                price: out.offerDetails.fare.total + ret.offerDetails.fare.total
+              })
+            }
+          }
+        }
+        combos.sort((a, b) => a.price - b.price)
+        return combos.slice(0, 20)
+      } else {
+        // One-way: just list outbound dates
+        return outbound
+          .map(e => ({ departure: e.departure, price: e.offerDetails.fare.total }))
+          .sort((a, b) => a.price - b.price)
+          .slice(0, 20)
+      }
+    } catch (e) {
+      console.error('Aerolíneas: flex parse error:', e.message)
+      return []
+    }
+  }
+
+  const emit = (flights, partial, flexDates) => console.log(JSON.stringify({ site: 'Aerolíneas Argentinas', url: siteUrl, flights, flexDates: flexDates || [], partial }))
 
   // Streaming: check periodically
   let lastFlightCount = 0, lastNewTime = Date.now()
@@ -160,19 +223,21 @@ try {
     if (flights.length > lastFlightCount) {
       lastNewTime = Date.now()
       lastFlightCount = flights.length
-      emit(flights, true)
+      emit(flights, true, buildFlexDates())
       console.error(`Aerolíneas: ${flights.length} flights (partial)`)
     } else if (lastFlightCount > 0 && Date.now() - lastNewTime > 5000) {
       break
     }
   }
 
+  await flexPromise
   const finalFlights = buildFlights()
-  console.error(`Aerolíneas: ${finalFlights.length} flights final`)
-  emit(finalFlights, false)
+  const finalFlexDates = buildFlexDates()
+  console.error(`Aerolíneas: ${finalFlights.length} flights, ${finalFlexDates.length} flex dates`)
+  emit(finalFlights, false, finalFlexDates)
 } catch (e) {
   console.error('Aerolíneas: error:', e.message)
-  console.log(JSON.stringify({ site: 'Aerolíneas Argentinas', url: siteUrl, flights: [], error: e.message, partial: false }))
+  console.log(JSON.stringify({ site: 'Aerolíneas Argentinas', url: siteUrl, flights: [], flexDates: [], error: e.message, partial: false }))
 } finally {
   await browser.close()
 }

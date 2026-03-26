@@ -117,7 +117,7 @@ try {
     return flights
   }
 
-  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Kayak', url, flights, partial }))
+  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Kayak', url, flights, flexDates: [], partial }))
 
   console.error('Kayak: loading...')
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 })
@@ -184,7 +184,7 @@ try {
   emit(finalFlights, false)
 } catch (e) {
   console.error('Kayak: error:', e.message)
-  console.log(JSON.stringify({ site: 'Kayak', url: '', flights: [], error: e.message, partial: false }))
+  console.log(JSON.stringify({ site: 'Kayak', url: '', flights: [], flexDates: [], error: e.message, partial: false }))
 } finally {
   await browser.close()
 }

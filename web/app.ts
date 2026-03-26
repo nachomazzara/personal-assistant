@@ -1,4 +1,5 @@
-import { renderFlights, renderCombined } from "./renderers/flights.js";
+import { renderFlights, renderCombined, renderFlexDates } from "./renderers/flights.js";
+import type { FlexDateEntry } from "./renderers/flights.js";
 import { renderDefault } from "./renderers/default.js";
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,8 @@ const sections = new Map<string, HTMLElement>();
 const sourceData = new Map<string, any>();
 let viewMode: "by-source" | "combined" = "by-source";
 let durationRange = { max: 2000 };
+let lastArgs: Record<string, string> = {};
+let lastCategory = "";
 
 // ---------------------------------------------------------------------------
 // Message handler
@@ -131,7 +134,9 @@ function handleMessage(msg: any) {
       applyFilters();
       if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
 
-      const itemsKey = Object.keys(udata).find((k) => Array.isArray(udata[k]));
+      updateFlexDates();
+
+      const itemsKey = Object.keys(udata).find((k) => k === "flights" && Array.isArray(udata[k]));
       const itemCount = itemsKey ? udata[itemsKey].length : 0;
       const header = usection.querySelector(".source-header span:last-of-type");
       if (header) header.textContent = `${msg.skill} (${itemCount} results...)`;
@@ -160,7 +165,7 @@ function handleMessage(msg: any) {
       data.site = data.site || msg.skill;
       sourceData.set(id, data);
 
-      const doneItemsKey = Object.keys(data).find((k: string) => Array.isArray(data[k]));
+      const doneItemsKey = Object.keys(data).find((k: string) => k === "flights" && Array.isArray(data[k]));
       const finalCount = doneItemsKey ? data[doneItemsKey].length : 0;
       const nameSpan = section.querySelector(".source-header span:last-of-type");
       if (nameSpan) nameSpan.textContent = `${msg.skill} (${finalCount})`;
@@ -172,6 +177,7 @@ function handleMessage(msg: any) {
         renderCombinedView();
       }
 
+      updateFlexDates();
       updateFilterBounds();
       applyFilters();
       if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
@@ -214,10 +220,60 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
   sourceData.clear();
   const combinedEl = document.getElementById("combined-results");
   if (combinedEl) combinedEl.remove();
+  const flexEl = document.getElementById("flex-dates");
+  if (flexEl) flexEl.remove();
   filtersEl.classList.add("hidden");
+
+  lastCategory = s.category;
+  lastArgs = { ...s.args };
 
   setLoading(true);
   ws.send(JSON.stringify({ type: "execute", category: s.category, args: s.args }));
+}
+
+// ---------------------------------------------------------------------------
+// Flex dates aggregation
+// ---------------------------------------------------------------------------
+function aggregateFlexDates(): FlexDateEntry[] {
+  const all: FlexDateEntry[] = [];
+  for (const [id, data] of sourceData) {
+    if (!data.flexDates || data.flexDates.length === 0) continue;
+    const siteName = data.site || id.split("/")[1] || "";
+    for (const fd of data.flexDates) {
+      all.push({ ...fd, source: siteName });
+    }
+  }
+  return all;
+}
+
+function getCheapestFlightPrice(): number | undefined {
+  let min = Infinity;
+  for (const data of sourceData.values()) {
+    if (!data.flights) continue;
+    for (const f of data.flights) {
+      if (f.priceRaw && f.priceRaw < min) min = f.priceRaw;
+    }
+  }
+  return min === Infinity ? undefined : min;
+}
+
+function updateFlexDates() {
+  const flexDates = aggregateFlexDates();
+  if (flexDates.length === 0) return;
+
+  let flexEl = document.getElementById("flex-dates");
+  if (!flexEl) {
+    flexEl = document.createElement("div");
+    flexEl.id = "flex-dates";
+    results.insertBefore(flexEl, results.firstChild);
+  }
+
+  const cheapest = getCheapestFlightPrice();
+  renderFlexDates(flexDates, flexEl, lastArgs["departure"] || "", lastArgs["return"], cheapest, (dep, ret) => {
+    const newArgs: Record<string, string> = { ...lastArgs, departure: dep };
+    if (ret) newArgs["return"] = ret; else delete newArgs["return"];
+    executeSuggestion({ label: "", category: lastCategory, args: newArgs });
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -115,8 +115,12 @@ const browser = await puppeteerExtra.launch({
 try {
   const page = await browser.newPage()
   const apiCalls = []
+  const gridCalls = []
   page.on('response', async (res) => {
-    if ((res.url().includes('GetShoppingResults') || res.url().includes('FlightsFrontendService')) && !res.url().includes('gstatic.com')) {
+    const u = res.url()
+    if (u.includes('GetCalendarGrid')) {
+      try { const t = await res.text(); if (t.length > 500) gridCalls.push(t) } catch {}
+    } else if ((u.includes('GetShoppingResults') || u.includes('FlightsFrontendService')) && !u.includes('gstatic.com')) {
       try { const t = await res.text(); if (t.length > 1000) apiCalls.push(t) } catch {}
     }
   })
@@ -137,7 +141,44 @@ try {
     return flights
   }
 
-  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Google Flights', url, flights, partial }))
+  function buildFlexDates() {
+    if (gridCalls.length === 0) return []
+    try {
+      let raw = gridCalls[gridCalls.length - 1]
+      if (raw.startsWith(")]}'")) raw = raw.substring(4)
+      raw = raw.trim()
+      const nlIdx = raw.indexOf('\n')
+      if (nlIdx > 0 && nlIdx < 10 && /^\d+$/.test(raw.substring(0, nlIdx))) raw = raw.substring(nlIdx + 1)
+      let depth = 0, end = 0
+      for (let j = 0; j < raw.length; j++) {
+        if (raw[j] === '[') depth++
+        else if (raw[j] === ']') { depth--; if (depth === 0) { end = j + 1; break } }
+      }
+      const outer = JSON.parse(raw.substring(0, end))
+      const innerStr = outer[0]?.[2]
+      if (!innerStr) return []
+      const inner = typeof innerStr === 'string' ? JSON.parse(innerStr) : innerStr
+      const entries = inner[1] || []
+      const results = []
+      for (const entry of entries) {
+        if (!Array.isArray(entry) || entry.length < 3) continue
+        const depDate = entry[0], retDate = entry[1]
+        const price = entry[2]?.[0]?.[1]
+        if (depDate && price && typeof price === 'number') {
+          const r = { departure: depDate, price }
+          if (retDate) r.return = retDate
+          results.push(r)
+        }
+      }
+      results.sort((a, b) => a.price - b.price)
+      return results.slice(0, 20)
+    } catch (e) {
+      console.error('Google Flights: flex parse error:', e.message)
+      return []
+    }
+  }
+
+  const emit = (flights, partial, flexDates) => console.log(JSON.stringify({ site: 'Google Flights', url, flights, flexDates: flexDates || [], partial }))
 
   console.error('Google Flights: loading...')
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
@@ -180,12 +221,27 @@ try {
     }
   }
 
+  // Click "Date grid" to get flex date prices
+  try {
+    const gridClicked = await page.evaluate(() => {
+      const btn = [...document.querySelectorAll('button')].find(b => /date grid/i.test(b.textContent) && b.offsetParent)
+      if (btn) { btn.click(); return true }
+      return false
+    })
+    if (gridClicked) {
+      console.error('Google Flights: clicked Date grid, waiting for data...')
+      for (let i = 0; i < 5; i++) { if (gridCalls.length > 0) break; await wait(2000) }
+      console.error(`Google Flights: ${gridCalls.length} grid API calls captured`)
+    }
+  } catch (e) { console.error('Google Flights: date grid error:', e.message) }
+
   const finalFlights = buildFlights()
-  console.error(`Google Flights: ${finalFlights.length} flights final from ${apiCalls.length} API calls`)
-  emit(finalFlights, false)
+  const finalFlexDates = buildFlexDates()
+  console.error(`Google Flights: ${finalFlights.length} flights, ${finalFlexDates.length} flex dates`)
+  emit(finalFlights, false, finalFlexDates)
 } catch (e) {
   console.error('Google Flights: error:', e.message)
-  console.log(JSON.stringify({ site: 'Google Flights', url: '', flights: [], error: e.message, partial: false }))
+  console.log(JSON.stringify({ site: 'Google Flights', url: '', flights: [], flexDates: [], error: e.message, partial: false }))
 } finally {
   await browser.close()
 }

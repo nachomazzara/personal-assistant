@@ -22,11 +22,19 @@ export interface Flight {
   _url?: string;
 }
 
+export interface FlexDateEntry {
+  departure: string;    // YYYY-MM-DD
+  return?: string;      // YYYY-MM-DD (omitted for one-way)
+  price: number;
+  source?: string;
+}
+
 export interface FlightData {
   source?: string;
   site?: string;
   url?: string;
   flights?: Flight[];
+  flexDates?: FlexDateEntry[];
   note?: string;
   error?: string;
 }
@@ -248,4 +256,93 @@ function renderCards(flights: Flight[], showSource: boolean): string {
       </div>
     `;
   }).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Flex dates: cheapest nearby date combos
+// ---------------------------------------------------------------------------
+function formatFlexDate(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+export function renderFlexDates(
+  flexDates: FlexDateEntry[],
+  container: HTMLElement,
+  currentDep: string,
+  currentRet?: string,
+  currentCheapestPrice?: number,
+  onSearch?: (departure: string, returnDate?: string) => void,
+): void {
+  if (!flexDates || flexDates.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+
+  // Dedup by date combo, keep min price
+  const byKey = new Map<string, FlexDateEntry>();
+  for (const fd of flexDates) {
+    const key = `${fd.departure}|${fd.return || ""}`;
+    const existing = byKey.get(key);
+    if (!existing || fd.price < existing.price) {
+      byKey.set(key, fd);
+    }
+  }
+  const sorted = [...byKey.values()].sort((a, b) => a.price - b.price);
+  const top = sorted.slice(0, 7);
+  if (top.length === 0) { container.innerHTML = ""; return; }
+
+  // Use the actual cheapest flight price as baseline, falling back to flex calendar price for current dates
+  const currentKey = `${currentDep}|${currentRet || ""}`;
+  const baseline = currentCheapestPrice || byKey.get(currentKey)?.price || 0;
+
+  const cards = top.map((fd, i) => {
+    const key = `${fd.departure}|${fd.return || ""}`;
+    const isCurrent = key === currentKey;
+    const isCheapest = i === 0 && !isCurrent && fd.price < baseline;
+    const cls = ["flex-date-card"];
+    if (isCurrent) cls.push("current");
+    if (isCheapest) cls.push("cheapest");
+
+    const savings = isCurrent || !baseline ? "" : (() => {
+      if (fd.price < baseline) {
+        const diff = baseline - fd.price;
+        return `<span class="flex-savings">Save $${diff}</span>`;
+      }
+      return "";
+    })();
+
+    return `
+      <div class="${cls.join(" ")}" data-dep="${fd.departure}" data-ret="${fd.return || ""}">
+        <div class="flex-date-price">$${fd.price}</div>
+        <div class="flex-date-dates">
+          <span>${formatFlexDate(fd.departure)}</span>
+          ${fd.return ? `<span class="arrow">→</span><span>${formatFlexDate(fd.return)}</span>` : ""}
+        </div>
+        ${isCurrent ? '<span class="flex-badge current-badge">Your dates</span>' : ""}
+        ${isCheapest ? '<span class="flex-badge cheapest-badge">Cheapest</span>' : ""}
+        ${savings}
+        ${!isCurrent ? '<button class="flex-search-btn">Search</button>' : ""}
+      </div>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <div class="flex-dates-section">
+      <div class="flex-dates-header">Cheapest nearby dates</div>
+      <div class="flex-dates-list">${cards}</div>
+    </div>
+  `;
+
+  // Bind search buttons
+  if (onSearch) {
+    container.querySelectorAll(".flex-search-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const card = btn.closest(".flex-date-card") as HTMLElement;
+        const dep = card?.dataset.dep;
+        const ret = card?.dataset.ret || undefined;
+        if (dep) onSearch(dep, ret);
+      });
+    });
+  }
 }

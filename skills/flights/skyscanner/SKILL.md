@@ -136,7 +136,7 @@ try {
 
       if (page.url().includes('captcha')) {
         console.error('Skyscanner: captcha failed')
-        console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], error: 'PerimeterX captcha failed' }))
+        console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], flexDates: [], error: 'PerimeterX captcha failed' }))
         process.exit(0)
       }
     }
@@ -194,7 +194,7 @@ try {
   }
 
   const skyUrl = url.replace('skyscanner.es', 'skyscanner.com')
-  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Skyscanner', url: skyUrl, flights, partial }))
+  const emit = (flights, partial) => console.log(JSON.stringify({ site: 'Skyscanner', url: skyUrl, flights, flexDates: [], partial }))
 
   // Streaming poll loop
   console.error('Skyscanner: waiting for flight data...')
@@ -218,7 +218,7 @@ try {
   emit(finalFlights, false)
 } catch (e) {
   console.error('Skyscanner: error:', e.message)
-  console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], error: e.message, partial: false }))
+  console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], flexDates: [], error: e.message, partial: false }))
 } finally {
   await browser.close()
 }

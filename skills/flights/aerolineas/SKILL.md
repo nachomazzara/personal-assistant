@@ -52,6 +52,7 @@ const siteUrl = pageUrl
 
 const browser = await puppeteerExtra.launch({
   headless: 'new',
+  channel: 'chrome',
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
   defaultViewport: { width: 1366, height: 768 }
 })

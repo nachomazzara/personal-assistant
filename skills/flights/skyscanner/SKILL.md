@@ -44,6 +44,7 @@ const EUR_TO_USD = 1.08
 
 const browser = await rebrowser.launch({
   headless: false,
+  channel: 'chrome',
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1512,982', '--user-data-dir=/tmp/sky-scraper-profile'],
   defaultViewport: null,
 })

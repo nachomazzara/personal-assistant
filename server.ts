@@ -75,7 +75,7 @@ wss.on("connection", (ws: WebSocket) => {
   console.error("[server] Client connected");
 
   ws.on("message", async (raw: Buffer) => {
-    let msg: { type: string; text?: string; category?: string; args?: Record<string, string> };
+    let msg: { type: string; text?: string; category?: string; args?: Record<string, string>; providerPriority?: Record<string, string[]> };
     try {
       msg = JSON.parse(raw.toString());
     } catch {
@@ -96,7 +96,8 @@ wss.on("connection", (ws: WebSocket) => {
       try {
         const result = await routePrompt(msg.text);
         console.error(`[server] Suggestions: ${result.suggestions.map((s) => s.label).join(", ")}`);
-        send(ws, { type: "suggestions", suggestions: result.suggestions });
+        if (result.providerPriority) console.error(`[server] Provider priority: top=${result.providerPriority.top}, mid=${result.providerPriority.medium}, low=${result.providerPriority.low}`);
+        send(ws, { type: "suggestions", suggestions: result.suggestions, providerPriority: result.providerPriority });
       } catch (err) {
         send(ws, { type: "error", message: (err as Error).message });
       }
@@ -105,6 +106,7 @@ wss.on("connection", (ws: WebSocket) => {
 
     // Step 2: User selects a suggestion → run the orchestrator
     if (msg.type === "execute" && msg.category && msg.args) {
+      const providerPriority = msg.providerPriority as Record<string, string[]> | undefined;
       if (running) {
         send(ws, { type: "error", message: "A search is already running" });
         return;
@@ -127,7 +129,7 @@ wss.on("connection", (ws: WebSocket) => {
           send(ws, { type: "skill:error", ...e });
         });
 
-        const results = await orchestrator.run(msg.category, msg.args);
+        const results = await orchestrator.run(msg.category, msg.args, providerPriority as any);
         send(ws, { type: "done", results });
       } catch (err) {
         send(ws, { type: "error", message: (err as Error).message });

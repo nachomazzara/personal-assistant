@@ -161,35 +161,82 @@ function runScriptDirect(
 // ---------------------------------------------------------------------------
 // Orchestrator — pure execution, no routing logic
 // ---------------------------------------------------------------------------
+export interface ProviderPriority {
+  top: string[];
+  medium: string[];
+  low: string[];
+}
+
 export class Orchestrator extends EventEmitter {
-  async run(category: string, args: Record<string, string>): Promise<SkillResult[]> {
+  async run(category: string, args: Record<string, string>, providerPriority?: ProviderPriority): Promise<SkillResult[]> {
     const skills = discoverSkills(category);
     if (skills.length === 0) throw new Error(`No skills found for category: ${category}`);
 
     const config = readCategoryConfig(category);
     const maxConcurrent = config.maxConcurrent || skills.length;
     extractScripts(skills);
-    console.error(`[orchestrator] "${category}": ${skills.length} skills, max ${maxConcurrent} concurrent`);
 
+    // Expand comma-separated from/to into airport combos
+    const origins = (args.from || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const destinations = (args.to || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const combos: { from: string; to: string; label: string }[] = [];
+    for (const from of origins.length ? origins : [args.from || ""]) {
+      for (const to of destinations.length ? destinations : [args.to || ""]) {
+        combos.push({ from, to, label: origins.length + destinations.length > 2 ? `${from}→${to}` : "" });
+      }
+    }
+
+    // Build priority lookup: skill name → "top" | "medium" | "low"
+    const priorityOf = (name: string): string => {
+      if (!providerPriority) return "top";
+      if (providerPriority.top.includes(name)) return "top";
+      if (providerPriority.medium.includes(name)) return "medium";
+      if (providerPriority.low.includes(name)) return "low";
+      return "medium";
+    };
+
+    // Build all (skill, combo) jobs
+    const jobs: { skill: Skill; args: Record<string, string>; label: string; priority: string }[] = [];
+    for (const skill of skills) {
+      for (const combo of combos) {
+        jobs.push({ skill, args: { ...args, from: combo.from, to: combo.to }, label: combo.label, priority: priorityOf(skill.name) });
+      }
+    }
+
+    // Sort jobs by priority: top first, then medium, then low
+    const priorityOrder: Record<string, number> = { top: 0, medium: 1, low: 2 };
+    jobs.sort((a, b) => (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1));
+
+    const topCount = jobs.filter(j => j.priority === "top").length;
+    const midCount = jobs.filter(j => j.priority === "medium").length;
+    const lowCount = jobs.filter(j => j.priority === "low").length;
+    console.error(`[orchestrator] "${category}": ${jobs.length} jobs (${topCount} top, ${midCount} mid, ${lowCount} low), max ${maxConcurrent} concurrent`);
+
+    const runJob = (job: typeof jobs[0]): Promise<SkillResult> => {
+      const skillName = job.label ? `${job.skill.name} (${job.label})` : job.skill.name;
+      const source = `${job.skill.category}/${skillName}`;
+      console.error(`[orchestrator] ${source} [${job.priority}]: direct script (0 tokens)`);
+      this.emit("skill:start", { category: job.skill.category, skill: skillName, priority: job.priority });
+
+      return runScriptDirect(job.skill, job.args, (partial) => {
+        this.emit("skill:update", { category: job.skill.category, skill: skillName, data: partial });
+      }, config).then((result) => {
+        this.emit("skill:done", { category: job.skill.category, skill: skillName, data: result });
+        return result;
+      }).catch((err) => {
+        const error = (err as Error).message;
+        this.emit("skill:error", { category: job.skill.category, skill: skillName, error });
+        return { source, error } as SkillResult;
+      });
+    };
+
+    // Run in batches of maxConcurrent, respecting priority order (jobs already sorted).
+    // Batches are filled sequentially: all tops first, then mediums, then lows.
+    // A batch may mix tiers only when a tier doesn't fill the remaining slots.
     const allResults: SkillResult[] = [];
-    for (let i = 0; i < skills.length; i += maxConcurrent) {
-      const batch = skills.slice(i, i + maxConcurrent);
-      const batchResults = await Promise.all(batch.map((skill) => {
-        const source = `${skill.category}/${skill.name}`;
-        console.error(`[orchestrator] ${source}: direct script (0 tokens)`);
-        this.emit("skill:start", { category: skill.category, skill: skill.name });
-
-        return runScriptDirect(skill, args, (partial) => {
-          this.emit("skill:update", { category: skill.category, skill: skill.name, data: partial });
-        }, config).then((result) => {
-          this.emit("skill:done", { category: skill.category, skill: skill.name, data: result });
-          return result;
-        }).catch((err) => {
-          const error = (err as Error).message;
-          this.emit("skill:error", { category: skill.category, skill: skill.name, error });
-          return { source, error } as SkillResult;
-        });
-      }));
+    for (let i = 0; i < jobs.length; i += maxConcurrent) {
+      const batch = jobs.slice(i, i + maxConcurrent);
+      const batchResults = await Promise.all(batch.map(runJob));
       allResults.push(...batchResults.filter((r): r is SkillResult => r !== null));
     }
 

@@ -26,31 +26,30 @@
   </header>
 
   <div id="filters" class="hidden">
-    <div class="filter-group">
-      <label>Price</label>
-      <span id="price-label">$0 – $0</span>
-      <input type="range" id="price-min" min="0" max="5000" value="0" />
-      <input type="range" id="price-max" min="0" max="5000" value="5000" />
+    <select id="price-filter" class="filter-select">
+      <option value="any">Any price</option>
+      <option value="500">Under $500</option>
+      <option value="1000">Under $1,000</option>
+      <option value="1500">Under $1,500</option>
+      <option value="2000">Under $2,000</option>
+      <option value="3000">Under $3,000</option>
+    </select>
+    <select id="duration-filter" class="filter-select">
+      <option value="any">Any duration</option>
+      <option value="720">Under 12h</option>
+      <option value="960">Under 16h</option>
+      <option value="1200">Under 20h</option>
+      <option value="1440">Under 24h</option>
+    </select>
+    <div class="stops-pills">
+      <button type="button" class="stop-btn active" data-stops="any">Any</button>
+      <button type="button" class="stop-btn" data-stops="0">Direct</button>
+      <button type="button" class="stop-btn" data-stops="1">1 stop</button>
+      <button type="button" class="stop-btn" data-stops="2">2+</button>
     </div>
-    <div class="filter-group">
-      <label>Max duration</label>
-      <span id="duration-label">0h</span>
-      <input type="range" id="duration-max" min="0" max="2000" value="2000" />
-    </div>
-    <div class="filter-group">
-      <label>Stops</label>
-      <div class="stops-buttons">
-        <button type="button" class="stop-btn active" data-stops="any">Any</button>
-        <button type="button" class="stop-btn" data-stops="0">Direct</button>
-        <button type="button" class="stop-btn" data-stops="1">1 stop</button>
-        <button type="button" class="stop-btn" data-stops="2">2+</button>
-      </div>
-    </div>
-    <div class="filter-meta">
-      <span id="filter-count"></span>
-      <button id="view-toggle" type="button">All combined</button>
-      <button id="filter-reset" type="button">Reset</button>
-    </div>
+    <span id="filter-count" class="filter-count"></span>
+    <button id="view-toggle" type="button" class="filter-btn">All combined</button>
+    <button id="filter-reset" type="button" class="filter-btn">Reset</button>
   </div>
 
   <main id="results"></main>

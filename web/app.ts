@@ -10,11 +10,8 @@ const input = document.getElementById("prompt-input") as HTMLInputElement;
 const btn = document.getElementById("prompt-btn") as HTMLButtonElement;
 const results = document.getElementById("results") as HTMLElement;
 const filtersEl = document.getElementById("filters") as HTMLElement;
-const priceMinEl = document.getElementById("price-min") as HTMLInputElement;
-const priceMaxEl = document.getElementById("price-max") as HTMLInputElement;
-const durationMaxEl = document.getElementById("duration-max") as HTMLInputElement;
-const priceLabelEl = document.getElementById("price-label") as HTMLElement;
-const durationLabelEl = document.getElementById("duration-label") as HTMLElement;
+const priceFilterEl = document.getElementById("price-filter") as HTMLSelectElement;
+const durationFilterEl = document.getElementById("duration-filter") as HTMLSelectElement;
 const filterCountEl = document.getElementById("filter-count") as HTMLElement;
 const filterResetEl = document.getElementById("filter-reset") as HTMLButtonElement;
 const viewToggle = document.getElementById("view-toggle") as HTMLButtonElement;
@@ -52,9 +49,45 @@ connect();
 const sections = new Map<string, HTMLElement>();
 const sourceData = new Map<string, any>();
 let viewMode: "by-source" | "combined" = "by-source";
-let durationRange = { max: 2000 };
 let lastArgs: Record<string, string> = {};
 let lastCategory = "";
+let activeSkills = new Set<string>();
+const skillPriority = new Map<string, string>();
+let lastProviderPriority: Record<string, string[]> | undefined;
+
+// ---------------------------------------------------------------------------
+// Search status banner
+// ---------------------------------------------------------------------------
+function updateSearchBanner() {
+  let banner = document.getElementById("search-banner");
+  if (activeSkills.size === 0) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "search-banner";
+    results.insertBefore(banner, results.firstChild);
+  } else if (banner !== results.firstChild) {
+    results.insertBefore(banner, results.firstChild);
+  }
+
+  // Group active skills by priority
+  const tiers: Record<string, string[]> = { top: [], medium: [], low: [] };
+  for (const id of activeSkills) {
+    const p = skillPriority.get(id) || "top";
+    const name = id.split("/").pop() || id;
+    if (!tiers[p]) tiers[p] = [];
+    tiers[p].push(name);
+  }
+
+  const parts: string[] = [];
+  if (tiers.top.length) parts.push(`<span class="tier tier-top">${tiers.top.length} top</span> <span class="tier-names">${tiers.top.join(", ")}</span>`);
+  if (tiers.medium.length) parts.push(`<span class="tier tier-mid">${tiers.medium.length} mid</span> <span class="tier-names">${tiers.medium.join(", ")}</span>`);
+  if (tiers.low.length) parts.push(`<span class="tier tier-low">${tiers.low.length} low</span> <span class="tier-names">${tiers.low.join(", ")}</span>`);
+
+  banner.innerHTML = `<span class="banner-dot"></span> Searching ${activeSkills.size} providers: ${parts.join(" · ")}`;
+}
 
 // ---------------------------------------------------------------------------
 // Message handler
@@ -68,6 +101,7 @@ function handleMessage(msg: any) {
 
     case "suggestions": {
       const suggestions: { label: string; category: string; args: Record<string, string> }[] = msg.suggestions;
+      lastProviderPriority = msg.providerPriority;
       results.innerHTML = `
         <div class="suggestions">
           <h3>Pick a search</h3>
@@ -95,6 +129,9 @@ function handleMessage(msg: any) {
 
     case "skill:start": {
       const id = `${msg.category}/${msg.skill}`;
+      activeSkills.add(id);
+      if (msg.priority) skillPriority.set(id, msg.priority);
+      updateSearchBanner();
       const section = document.createElement("div");
       section.className = "source-section";
       section.dataset.id = id;
@@ -130,7 +167,6 @@ function handleMessage(msg: any) {
         renderCombinedView();
       }
 
-      updateFilterBounds();
       applyFilters();
       if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
 
@@ -145,6 +181,8 @@ function handleMessage(msg: any) {
 
     case "skill:done": {
       const id = `${msg.category}/${msg.skill}`;
+      activeSkills.delete(id);
+      updateSearchBanner();
       const section = sections.get(id);
       if (!section) break;
 
@@ -178,7 +216,6 @@ function handleMessage(msg: any) {
       }
 
       updateFlexDates();
-      updateFilterBounds();
       applyFilters();
       if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
       break;
@@ -186,6 +223,8 @@ function handleMessage(msg: any) {
 
     case "skill:error": {
       const id = `${msg.category}/${msg.skill}`;
+      activeSkills.delete(id);
+      updateSearchBanner();
       const section = sections.get(id);
       if (!section) break;
       const status = section.querySelector(".status")!;
@@ -197,6 +236,8 @@ function handleMessage(msg: any) {
     }
 
     case "done":
+      activeSkills.clear();
+      updateSearchBanner();
       setLoading(false);
       break;
 
@@ -218,6 +259,8 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
   results.innerHTML = "";
   sections.clear();
   sourceData.clear();
+  activeSkills.clear();
+  skillPriority.clear();
   const combinedEl = document.getElementById("combined-results");
   if (combinedEl) combinedEl.remove();
   const flexEl = document.getElementById("flex-dates");
@@ -228,7 +271,7 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
   lastArgs = { ...s.args };
 
   setLoading(true);
-  ws.send(JSON.stringify({ type: "execute", category: s.category, args: s.args }));
+  ws.send(JSON.stringify({ type: "execute", category: s.category, args: s.args, providerPriority: lastProviderPriority }));
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +384,6 @@ viewToggle.addEventListener("click", () => {
     renderBySourceView();
   }
 
-  updateFilterBounds();
   applyFilters();
 });
 
@@ -377,47 +419,11 @@ function getFlightCards(): HTMLElement[] {
   return Array.from(results.querySelectorAll(".flight-card"));
 }
 
-function updateFilterBounds() {
-  const cards = getFlightCards();
-  let minP = Infinity, maxP = 0, maxD = 0;
-  for (const card of cards) {
-    const p = parseFloat(card.dataset.price || "0");
-    const d = parseFloat(card.dataset.duration || "0");
-    if (p > 0 && p < minP) minP = p;
-    if (p > maxP) maxP = p;
-    if (d > maxD) maxD = d;
-  }
-
-  if (minP === Infinity) minP = 0;
-  durationRange = { max: maxD || 2000 };
-
-  priceMinEl.min = "0";
-  priceMinEl.max = String(maxP);
-  priceMinEl.value = "0";
-  priceMaxEl.min = "0";
-  priceMaxEl.max = String(maxP);
-  priceMaxEl.value = String(maxP);
-  durationMaxEl.min = "0";
-  durationMaxEl.max = String(durationRange.max);
-  durationMaxEl.value = String(durationRange.max);
-
-  updateFilterLabels();
-}
-
-function updateFilterLabels() {
-  const pMin = parseInt(priceMinEl.value);
-  const pMax = parseInt(priceMaxEl.value);
-  const dMax = parseInt(durationMaxEl.value);
-  priceLabelEl.textContent = `$${pMin} – $${pMax}`;
-  durationLabelEl.textContent = dMax >= durationRange.max ? "Any" : `${Math.floor(dMax / 60)}h ${dMax % 60}m`;
-}
-
 let stopsFilter = "any";
 
 function applyFilters() {
-  const pMin = parseInt(priceMinEl.value);
-  const pMax = parseInt(priceMaxEl.value);
-  const dMax = parseInt(durationMaxEl.value);
+  const priceMax = priceFilterEl.value === "any" ? Infinity : parseInt(priceFilterEl.value);
+  const durationMax = durationFilterEl.value === "any" ? Infinity : parseInt(durationFilterEl.value);
   const cards = getFlightCards();
 
   let visible = 0;
@@ -426,8 +432,8 @@ function applyFilters() {
     const d = parseFloat(card.dataset.duration || "0");
     const s = parseInt(card.dataset.stops || "0");
 
-    const priceOk = p === 0 || (p >= pMin && p <= pMax);
-    const durationOk = d === 0 || d <= dMax;
+    const priceOk = p === 0 || p <= priceMax;
+    const durationOk = d === 0 || d <= durationMax;
     const stopsOk = stopsFilter === "any"
       || (stopsFilter === "0" && s === 0)
       || (stopsFilter === "1" && s === 1)
@@ -438,13 +444,11 @@ function applyFilters() {
     if (show) visible++;
   }
 
-  filterCountEl.textContent = `${visible} of ${cards.length} flights`;
-  updateFilterLabels();
+  filterCountEl.textContent = `${visible} of ${cards.length}`;
 }
 
-priceMinEl.addEventListener("input", applyFilters);
-priceMaxEl.addEventListener("input", applyFilters);
-durationMaxEl.addEventListener("input", applyFilters);
+priceFilterEl.addEventListener("change", applyFilters);
+durationFilterEl.addEventListener("change", applyFilters);
 
 document.querySelectorAll(".stop-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -456,9 +460,8 @@ document.querySelectorAll(".stop-btn").forEach((btn) => {
 });
 
 filterResetEl.addEventListener("click", () => {
-  priceMinEl.value = "0";
-  priceMaxEl.value = priceMaxEl.max;
-  durationMaxEl.value = durationMaxEl.max;
+  priceFilterEl.value = "any";
+  durationFilterEl.value = "any";
   stopsFilter = "any";
   document.querySelectorAll(".stop-btn").forEach((b) => b.classList.remove("active"));
   document.querySelector('.stop-btn[data-stops="any"]')?.classList.add("active");

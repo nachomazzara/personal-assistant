@@ -157,13 +157,15 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
+  padding: 8px 16px;
   margin-bottom: 12px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  white-space: nowrap;
+  overflow-x: auto;
 }
 
 .banner-dot {
@@ -181,18 +183,19 @@ body {
 }
 
 .tier {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 4px;
+  padding: 2px 5px;
+  border-radius: 3px;
   letter-spacing: 0.3px;
+  flex-shrink: 0;
 }
 
 .tier-top { background: var(--accent-dim); color: var(--accent); }
 .tier-mid { background: #2d2a1a; color: #facc15; }
 .tier-low { background: #1a1a2d; color: #818cf8; }
-.tier-names { font-size: 12px; color: var(--text-muted); }
+.tier-names { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
 
 /* --- Results --- */
 #results {
@@ -247,10 +250,10 @@ body {
 /* --- Flight Card --- */
 .flight-card {
   display: grid;
-  grid-template-columns: 90px 1fr 150px 80px 120px;
+  grid-template-columns: 80px 1fr 130px 70px 90px;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 10px;
+  padding: 12px 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -289,8 +292,21 @@ body {
 .flight-airline {
   font-size: 14px;
   font-weight: 500;
+  min-width: 0;
+}
+
+.flight-airline > span {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flight-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
 }
 
 .flight-times {
@@ -504,7 +520,7 @@ body {
 
   #filters { gap: 6px; }
   .filter-count { margin-left: 0; }
-  .flex-dates-list { grid-template-columns: 1fr; }
+  .flex-dates-list { overflow-x: auto; }
 }
 
 /* --- Flex Dates Section --- */
@@ -526,12 +542,16 @@ body {
 }
 
 .flex-dates-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  display: flex;
   gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
 }
 
 .flex-date-card {
+  flex-shrink: 0;
+  min-width: 155px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;

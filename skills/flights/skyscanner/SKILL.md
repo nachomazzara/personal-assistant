@@ -45,15 +45,21 @@ const EUR_TO_USD = 1.08
 const browser = await rebrowser.launch({
   headless: false,
   channel: 'chrome',
-  args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1512,982', '--user-data-dir=/tmp/sky-scraper-profile'],
+  args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1512,982', '--window-position=-2000,-2000', '--user-data-dir=/tmp/sky-scraper-profile'],
   defaultViewport: null,
 })
 
 try {
   const page = await browser.newPage()
 
-  // Override client hints to look like real Google Chrome
+  // Minimize the browser window immediately (can't use headless with rebrowser)
   const client = await page.createCDPSession()
+  try {
+    const { windowId } = await client.send('Browser.getWindowForTarget')
+    await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } })
+  } catch {}
+
+  // Override client hints to look like real Google Chrome
   await client.send('Network.setUserAgentOverride', {
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
     acceptLanguage: 'en,es-ES;q=0.9,es;q=0.8',

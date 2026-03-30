@@ -104,13 +104,40 @@ try {
           const stopCities = segMatch ? segMatch[1].split('-').filter(c => c.length === 3 && c !== from && c !== to).filter((c, i, a) => a.indexOf(c) === i) : []
           const legData = allItems[i + 15]
           let depTime = '', arrTime = '', retDepTime = '', retArrTime = ''
-          if (Array.isArray(legData)) {
-            const allTimes = JSON.stringify(legData).match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/g) || []
-            if (allTimes.length >= 2) { depTime = allTimes[0].substring(11, 16); arrTime = allTimes[1].substring(11, 16) }
-            if (legData.length >= 2 && Array.isArray(legData[1])) {
-              const retTimes = JSON.stringify(legData[1]).match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/g) || []
-              if (retTimes.length >= 2) { retDepTime = retTimes[0].substring(11, 16); retArrTime = retTimes[retTimes.length - 1].substring(11, 16) }
+          function extractTimes(leg) {
+            // Object format: { flights: [{ departureTime, arrivalTime }, ...] }
+            if (leg && typeof leg === 'object' && !Array.isArray(leg) && leg.flights) {
+              const segs = leg.flights
+              if (segs.length > 0) return { dep: segs[0].departureTime?.substring(11, 16) || '', arr: segs[segs.length - 1].arrivalTime?.substring(11, 16) || '' }
             }
+            // Array format: [..., flights-at-index-8, ...] where flights is [{departureTime, arrivalTime}]
+            if (Array.isArray(leg)) {
+              const flightsArr = leg.find(el => Array.isArray(el) && el.length > 0 && el[0]?.departureTime)
+              if (flightsArr) return { dep: flightsArr[0].departureTime?.substring(11, 16) || '', arr: flightsArr[flightsArr.length - 1].arrivalTime?.substring(11, 16) || '' }
+            }
+            // Fallback: regex on stringified JSON
+            const times = JSON.stringify(leg).match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/g) || []
+            if (times.length >= 2) return { dep: times[0].substring(11, 16), arr: times[times.length - 1].substring(11, 16) }
+            return { dep: '', arr: '' }
+          }
+          if (Array.isArray(legData)) {
+            const out = extractTimes(legData[0])
+            depTime = out.dep; arrTime = out.arr
+            if (legData.length >= 2) {
+              const ret = extractTimes(legData[1])
+              retDepTime = ret.dep; retArrTime = ret.arr
+            }
+          }
+          // Fallback: derive times from segStr (minutes from midnight)
+          // Format: AIRLINE:FLIGHT:DEP_MIN:AIRLINE:FLIGHT:ARR_MIN:0|...
+          const minToTime = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+          if (!depTime && legParts[0]) {
+            const p = legParts[0].split(':')
+            if (p.length >= 6) { depTime = minToTime(parseInt(p[2]) || 0); arrTime = minToTime(parseInt(p[p.length - 2]) || 0) }
+          }
+          if (!retDepTime && legParts[1]) {
+            const p = legParts[1].split(':')
+            if (p.length >= 6) { retDepTime = minToTime(parseInt(p[2]) || 0); retArrTime = minToTime(parseInt(p[p.length - 2]) || 0) }
           }
           const flight = {
             price: `$${price}`, priceRaw: price,
@@ -119,10 +146,19 @@ try {
             duration: totalDuration > 0 ? `${Math.floor(totalDuration / 60)}h ${totalDuration % 60}m` : '',
             durationMin: totalDuration, stops, stopCities, provider
           }
-          if (retDepTime || retDuration > 0) {
+          if (returnDate && (retDepTime || retArrTime || retDuration > 0)) {
             flight.returnDeparture = retDepTime
             flight.returnArrival = retArrTime
             flight.returnDuration = retDuration > 0 ? `${Math.floor(retDuration / 60)}h ${retDuration % 60}m` : ''
+            flight.returnAirline = airlineNames[retAirlineCode] || retAirlineCode || flight.airline
+            // Count return stops from segments
+            const retSegParts = (legParts[1] || '').split(':')
+            flight.returnStops = Math.max(0, Math.floor((retSegParts.length - 1) / 3) - 1)
+          } else if (returnDate && routeStr.includes('RoundTrip')) {
+            // Round trip but no return data parsed — still mark as having return
+            flight.returnDeparture = ''
+            flight.returnArrival = ''
+            flight.returnDuration = ''
             flight.returnAirline = airlineNames[retAirlineCode] || retAirlineCode || flight.airline
           }
           flights.push(flight)

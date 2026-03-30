@@ -117,6 +117,7 @@ function dedupFlights(flights: Flight[]): Flight[] {
 
   for (const f of flights) {
     // Normalize before dedup
+    if (f.priceRaw != null) f.priceRaw = Math.round(f.priceRaw);
     f.airline = normalizeAirline(f.airline || "");
     if (f.returnAirline) f.returnAirline = normalizeAirline(f.returnAirline);
 
@@ -170,6 +171,7 @@ export function renderFlights(data: FlightData, container: HTMLElement): void {
 
   const flights = (data.flights || []).map((f) => ({
     ...f,
+    priceRaw: f.priceRaw != null ? Math.round(f.priceRaw) : f.priceRaw,
     airline: normalizeAirline(f.airline || ""),
     returnAirline: f.returnAirline ? normalizeAirline(f.returnAirline) : f.returnAirline,
   }));
@@ -192,6 +194,12 @@ export function renderCombined(flights: Flight[], container: HTMLElement): void 
     <div class="combined-header">${deduped.length} unique flights (from ${flights.length} total)</div>
     ${renderCards(deduped, true)}
   `;
+}
+
+function formatPrice(f: Flight): string {
+  if (f.priceRaw != null) return `$${Math.round(f.priceRaw)}`;
+  if (f.price) return f.price.replace(/(\$\d+)\.\d+/, "$1");
+  return "—";
 }
 
 function isMultiAirline(f: Flight): boolean {
@@ -237,11 +245,10 @@ function renderCards(flights: Flight[], showSource: boolean): string {
 
     return `
       <div class="flight-card ${hasReturn ? "has-return" : ""}" data-price="${f.priceRaw || 0}" data-duration="${f.durationMin || 0}" data-stops="${f.stops ?? 0}" data-source="${f._source || ""}">
-        <div class="flight-price">${f.price || "—"}</div>
+        <div class="flight-price">${formatPrice(f)}</div>
         <div class="flight-airline">
-          ${f.airline || "—"}
-          ${multiTag}
-          ${providerText}
+          <span>${f.airline || "—"} ${multiTag} ${providerText}</span>
+          ${sourceTag ? `<div class="flight-sources">${sourceTag}</div>` : ""}
         </div>
         <div class="flight-times">
           <span>${f.departure || "—"}</span>
@@ -251,7 +258,6 @@ function renderCards(flights: Flight[], showSource: boolean): string {
         <div class="flight-duration">${f.duration || "—"}</div>
         <div class="flight-meta">
           ${stopsText}
-          ${sourceTag}
         </div>${returnRow}
       </div>
     `;

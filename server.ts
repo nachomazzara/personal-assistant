@@ -66,6 +66,7 @@ if (existsSync(DIST_DIR)) watch(DIST_DIR, { recursive: false }, onFileChange);
 // WebSocket — two-step flow
 // ---------------------------------------------------------------------------
 let running = false;
+let currentOrchestrator: Orchestrator | null = null;
 
 const send = (ws: WebSocket, data: any) => {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
@@ -83,11 +84,25 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
 
+    // Cancel running search
+    if (msg.type === "cancel") {
+      if (currentOrchestrator) {
+        console.error("[server] Cancelling running search");
+        currentOrchestrator.abort();
+        currentOrchestrator = null;
+        running = false;
+      }
+      return;
+    }
+
     // Step 1: User sends a prompt → route it and return suggestions
     if (msg.type === "prompt" && msg.text) {
-      if (running) {
-        send(ws, { type: "error", message: "A search is already running" });
-        return;
+      // Cancel any running search first
+      if (running && currentOrchestrator) {
+        console.error("[server] Cancelling previous search for new prompt");
+        currentOrchestrator.abort();
+        currentOrchestrator = null;
+        running = false;
       }
 
       console.error(`[server] Prompt: ${msg.text.slice(0, 100)}`);
@@ -107,9 +122,13 @@ wss.on("connection", (ws: WebSocket) => {
     // Step 2: User selects a suggestion → run the orchestrator
     if (msg.type === "execute" && msg.category && msg.args) {
       const providerPriority = msg.providerPriority as Record<string, string[]> | undefined;
-      if (running) {
-        send(ws, { type: "error", message: "A search is already running" });
-        return;
+
+      // Cancel previous search if still running
+      if (running && currentOrchestrator) {
+        console.error("[server] Cancelling previous search for new execute");
+        currentOrchestrator.abort();
+        currentOrchestrator = null;
+        running = false;
       }
 
       running = true;
@@ -117,6 +136,7 @@ wss.on("connection", (ws: WebSocket) => {
 
       try {
         const orchestrator = new Orchestrator();
+        currentOrchestrator = orchestrator;
 
         orchestrator.on("skill:start", (e) => send(ws, { type: "skill:start", ...e }));
         orchestrator.on("skill:update", (e) => send(ws, { type: "skill:update", ...e }));
@@ -134,6 +154,7 @@ wss.on("connection", (ws: WebSocket) => {
       } catch (err) {
         send(ws, { type: "error", message: (err as Error).message });
       } finally {
+        currentOrchestrator = null;
         running = false;
       }
       return;

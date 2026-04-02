@@ -5,10 +5,11 @@
     "from": "Origin airport IATA code(s), comma-separated for multi-airport cities (e.g. EZE, JFK,EWR,LGA)",
     "to": "Destination airport IATA code(s), comma-separated for multi-airport cities (e.g. JFK, CDG, MAD)",
     "departure": "Departure date in YYYY-MM-DD format",
-    "return": "Return date YYYY-MM-DD (OPTIONAL — omit this key entirely for one-way flights)"
+    "return": "Return date YYYY-MM-DD (OPTIONAL — omit this key entirely for one-way flights)",
+    "providers": "Comma-separated provider names to use (OPTIONAL — omit to use all). Available: google,skyscanner,kayak,turismocity,aerolineas,kiwi,latam,emirates"
   },
   "requiredFields": ["priceRaw", "airline", "departure", "arrival", "stops"],
-  "routerHints": "For IATA codes: use comma-separated codes for multi-airport cities: Buenos Aires → EZE,AEP. New York → JFK,EWR,LGA. London → LHR,LGW,STN. Paris → CDG,ORY. Milan → MXP,LIN. São Paulo → GRU,CGH. Rio → GIG,SDU. Chicago → ORD,MDW. Washington → IAD,DCA. For single-airport cities use just one code (e.g. Madrid → MAD). Dates must be YYYY-MM-DD. If no year given, use the current or next occurrence. dd/mm format (Spanish/Argentine): day/month not month/day. If NO return date is mentioned, omit the 'return' arg entirely (one-way search). Only include 'return' if the user explicitly mentions a return date.",
+  "routerHints": "If the user specifies particular airlines or providers (e.g. 'only aerolineas' or 'just google and kayak'), set the 'providers' arg with comma-separated names: google,skyscanner,kayak,turismocity,aerolineas,kiwi,latam,emirates. Omit 'providers' entirely to search all. For IATA codes: use comma-separated codes for multi-airport cities: Buenos Aires → EZE,AEP. New York → JFK,EWR,LGA. London → LHR,LGW,STN. Paris → CDG,ORY. Milan → MXP,LIN. São Paulo → GRU,CGH. Rio → GIG,SDU. Chicago → ORD,MDW. Washington → IAD,DCA. For single-airport cities use just one code (e.g. Madrid → MAD). Dates must be YYYY-MM-DD. If no year given, use the current or next occurrence. dd/mm format (Spanish/Argentine): day/month not month/day. If NO return date is mentioned, omit the 'return' arg entirely (one-way search). Only include 'return' if the user explicitly mentions a return date.",
   "renderer": "flights",
   "items": "flights"
 }

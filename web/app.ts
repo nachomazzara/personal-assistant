@@ -12,6 +12,7 @@ const results = document.getElementById("results") as HTMLElement;
 const filtersEl = document.getElementById("filters") as HTMLElement;
 const priceFilterEl = document.getElementById("price-filter") as HTMLSelectElement;
 const durationFilterEl = document.getElementById("duration-filter") as HTMLSelectElement;
+const sourceFilterEl = document.getElementById("source-filter") as HTMLSelectElement;
 const filterCountEl = document.getElementById("filter-count") as HTMLElement;
 const filterResetEl = document.getElementById("filter-reset") as HTMLButtonElement;
 const viewToggle = document.getElementById("view-toggle") as HTMLButtonElement;
@@ -167,6 +168,7 @@ function handleMessage(msg: any) {
         renderCombinedView();
       }
 
+      updateSourceFilter();
       applyFilters();
       if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
 
@@ -216,6 +218,7 @@ function handleMessage(msg: any) {
       }
 
       updateFlexDates();
+      updateSourceFilter();
       applyFilters();
       if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
       break;
@@ -261,6 +264,8 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
   sourceData.clear();
   activeSkills.clear();
   skillPriority.clear();
+  knownSources.clear();
+  sourceFilterEl.innerHTML = '<option value="any">All sources</option>';
   const combinedEl = document.getElementById("combined-results");
   if (combinedEl) combinedEl.remove();
   const flexEl = document.getElementById("flex-dates");
@@ -269,6 +274,10 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
 
   lastCategory = s.category;
   lastArgs = { ...s.args };
+
+  // Show selected search in the input field with route details
+  const details = [s.args.from, "→", s.args.to, s.args.departure, s.args.return].filter(Boolean).join(" ");
+  input.value = s.label ? `${s.label} · ${details}` : details;
 
   setLoading(true);
   ws.send(JSON.stringify({ type: "execute", category: s.category, args: s.args, providerPriority: lastProviderPriority }));
@@ -395,20 +404,37 @@ form.addEventListener("submit", (e) => {
   const text = input.value.trim();
   if (!text || ws.readyState !== WebSocket.OPEN) return;
 
+  // Cancel running search if any
+  if (isSearching) {
+    ws.send(JSON.stringify({ type: "cancel" }));
+  }
+
   results.innerHTML = "";
   sections.clear();
   sourceData.clear();
+  activeSkills.clear();
+  skillPriority.clear();
+  knownSources.clear();
+  sourceFilterEl.innerHTML = '<option value="any">All sources</option>';
   const combinedEl = document.getElementById("combined-results");
   if (combinedEl) combinedEl.remove();
+  const flexEl = document.getElementById("flex-dates");
+  if (flexEl) flexEl.remove();
+  const bannerEl = document.getElementById("search-banner");
+  if (bannerEl) bannerEl.remove();
   filtersEl.classList.add("hidden");
 
   setLoading(true);
   ws.send(JSON.stringify({ type: "prompt", text }));
 });
 
+let isSearching = false;
+
 function setLoading(loading: boolean) {
-  btn.disabled = loading;
-  input.disabled = loading;
+  isSearching = loading;
+  // Keep both input and button always enabled so user can cancel by starting a new search
+  btn.disabled = false;
+  input.disabled = false;
   if (!loading) input.focus();
 }
 
@@ -420,10 +446,30 @@ function getFlightCards(): HTMLElement[] {
 }
 
 let stopsFilter = "any";
+const knownSources = new Set<string>();
+
+function updateSourceFilter() {
+  // Collect all source names from sourceData
+  for (const data of sourceData.values()) {
+    const site = data.site || "";
+    if (site) knownSources.add(site);
+  }
+  // Rebuild options
+  const current = sourceFilterEl.value;
+  sourceFilterEl.innerHTML = '<option value="any">All sources</option>';
+  for (const src of [...knownSources].sort()) {
+    const opt = document.createElement("option");
+    opt.value = src;
+    opt.textContent = src;
+    sourceFilterEl.appendChild(opt);
+  }
+  sourceFilterEl.value = current;
+}
 
 function applyFilters() {
   const priceMax = priceFilterEl.value === "any" ? Infinity : parseInt(priceFilterEl.value);
   const durationMax = durationFilterEl.value === "any" ? Infinity : parseInt(durationFilterEl.value);
+  const sourceFilter = sourceFilterEl.value;
   const cards = getFlightCards();
 
   let visible = 0;
@@ -431,6 +477,7 @@ function applyFilters() {
     const p = parseFloat(card.dataset.price || "0");
     const d = parseFloat(card.dataset.duration || "0");
     const s = parseInt(card.dataset.stops || "0");
+    const src = card.dataset.source || "";
 
     const priceOk = p === 0 || p <= priceMax;
     const durationOk = d === 0 || d <= durationMax;
@@ -438,17 +485,38 @@ function applyFilters() {
       || (stopsFilter === "0" && s === 0)
       || (stopsFilter === "1" && s === 1)
       || (stopsFilter === "2" && s >= 2);
-    const show = priceOk && durationOk && stopsOk;
+    // In combined view, _source is on the card; in by-source view, check parent section
+    let sourceOk = sourceFilter === "any";
+    if (!sourceOk) {
+      if (src) {
+        sourceOk = src.includes(sourceFilter);
+      } else {
+        // By-source view: check the section's site name
+        const section = card.closest(".source-section") as HTMLElement;
+        const sectionId = section?.dataset.id || "";
+        const sectionSite = sourceData.get(sectionId)?.site || "";
+        sourceOk = sectionSite.includes(sourceFilter);
+      }
+    }
+    const show = priceOk && durationOk && stopsOk && sourceOk;
 
     card.classList.toggle("filtered", !show);
     if (show) visible++;
   }
 
   filterCountEl.textContent = `${visible} of ${cards.length}`;
+
+  // Hide source sections with zero visible flights
+  for (const section of sections.values()) {
+    const sectionCards = section.querySelectorAll(".flight-card");
+    const sectionVisible = [...sectionCards].filter((c) => !c.classList.contains("filtered")).length;
+    section.classList.toggle("section-hidden", sectionCards.length > 0 && sectionVisible === 0);
+  }
 }
 
 priceFilterEl.addEventListener("change", applyFilters);
 durationFilterEl.addEventListener("change", applyFilters);
+sourceFilterEl.addEventListener("change", applyFilters);
 
 document.querySelectorAll(".stop-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -462,6 +530,7 @@ document.querySelectorAll(".stop-btn").forEach((btn) => {
 filterResetEl.addEventListener("click", () => {
   priceFilterEl.value = "any";
   durationFilterEl.value = "any";
+  sourceFilterEl.value = "any";
   stopsFilter = "any";
   document.querySelectorAll(".stop-btn").forEach((b) => b.classList.remove("active"));
   document.querySelector('.stop-btn[data-stops="any"]')?.classList.add("active");

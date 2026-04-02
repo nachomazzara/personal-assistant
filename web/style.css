@@ -210,6 +210,8 @@ body {
   animation: fadeIn 0.3s ease;
 }
 
+.source-section.section-hidden { display: none; }
+
 .source-header {
   display: flex;
   align-items: center;

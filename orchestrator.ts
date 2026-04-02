@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, ChildProcess } from "node:child_process";
 import { readdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +72,7 @@ function runScriptDirect(
   args: Record<string, string>,
   onUpdate: (data: SkillResult) => void,
   config: CategoryConfig = {},
+  trackChild?: (child: ChildProcess) => void,
 ): Promise<SkillResult> {
   return new Promise((resolve) => {
     const source = `${skill.category}/${skill.name}`;
@@ -93,6 +94,8 @@ function runScriptDirect(
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 120_000,
     });
+
+    if (trackChild) trackChild(child);
 
     let lastResult: SkillResult | null = null;
     let stderr = "";
@@ -129,8 +132,15 @@ function runScriptDirect(
           );
           const brokenPct = broken.length / items.length;
           if (brokenPct > 0.5) {
-            console.error(`[orchestrator] ${source}: ${broken.length}/${items.length} items missing required fields`);
-            resolve({ source, error: `${Math.round(brokenPct * 100)}% missing required fields`, [itemsKey]: items, stderr: stderr.slice(-500) });
+            // Log which specific fields are missing for debugging
+            const fieldStats: Record<string, number> = {};
+            for (const k of required) {
+              fieldStats[k] = items.filter((item: any) => isNumericField(k) ? (item[k] === undefined || item[k] === null) : isMissing(item[k])).length;
+            }
+            const fieldReport = Object.entries(fieldStats).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}/${items.length}`).join(", ");
+            console.error(`[orchestrator] ${source}: ${broken.length}/${items.length} items missing required fields — ${fieldReport}`);
+            console.error(`[orchestrator] ${source}: sample broken item: ${JSON.stringify(broken[0]).slice(0, 300)}`);
+            resolve({ source, error: `${Math.round(brokenPct * 100)}% missing required fields (${fieldReport})`, [itemsKey]: items, stderr: stderr.slice(-500) });
             return;
           }
           if (broken.length > 0) {
@@ -168,9 +178,30 @@ export interface ProviderPriority {
 }
 
 export class Orchestrator extends EventEmitter {
+  private children = new Set<ChildProcess>();
+  private aborted = false;
+
+  abort() {
+    this.aborted = true;
+    for (const child of this.children) {
+      try { child.kill("SIGTERM"); } catch {}
+    }
+    this.children.clear();
+    console.error("[orchestrator] Aborted — killed all child processes");
+  }
+
   async run(category: string, args: Record<string, string>, providerPriority?: ProviderPriority): Promise<SkillResult[]> {
-    const skills = discoverSkills(category);
+    let skills = discoverSkills(category);
     if (skills.length === 0) throw new Error(`No skills found for category: ${category}`);
+
+    // Filter skills by providers arg if specified
+    if (args.providers) {
+      const allowed = args.providers.split(",").map((s) => s.trim().toLowerCase());
+      skills = skills.filter((s) => allowed.includes(s.name.toLowerCase()));
+      console.error(`[orchestrator] Filtered to providers: ${skills.map((s) => s.name).join(", ")}`);
+      // Remove providers from args passed to scripts
+      delete args.providers;
+    }
 
     const config = readCategoryConfig(category);
     const maxConcurrent = config.maxConcurrent || skills.length;
@@ -220,7 +251,7 @@ export class Orchestrator extends EventEmitter {
 
       return runScriptDirect(job.skill, job.args, (partial) => {
         this.emit("skill:update", { category: job.skill.category, skill: skillName, data: partial });
-      }, config).then((result) => {
+      }, config, (child) => this.children.add(child)).then((result) => {
         this.emit("skill:done", { category: job.skill.category, skill: skillName, data: result });
         return result;
       }).catch((err) => {
@@ -235,6 +266,7 @@ export class Orchestrator extends EventEmitter {
     // A batch may mix tiers only when a tier doesn't fill the remaining slots.
     const allResults: SkillResult[] = [];
     for (let i = 0; i < jobs.length; i += maxConcurrent) {
+      if (this.aborted) { console.error("[orchestrator] Aborted, skipping remaining jobs"); break; }
       const batch = jobs.slice(i, i + maxConcurrent);
       const batchResults = await Promise.all(batch.map(runJob));
       allResults.push(...batchResults.filter((r): r is SkillResult => r !== null));

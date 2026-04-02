@@ -102,11 +102,14 @@ try {
     }
   })
 
-  console.error('Skyscanner: loading...')
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
+  // Navigate with captcha retry (up to 3 attempts)
+  let captchaPassed = false
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    console.error(`Skyscanner: loading... (attempt ${attempt}/3)`)
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 }).catch(() => {})
 
-  // Handle captcha if it appears
-  if (page.url().includes('captcha')) {
+    if (!page.url().includes('captcha')) { captchaPassed = true; break }
+
     console.error('Skyscanner: captcha detected, attempting press & hold...')
     await wait(3000)
 
@@ -140,12 +143,17 @@ try {
       console.error(`Skyscanner: released after ${Date.now()-t0}ms`)
       await wait(10000)
 
-      if (page.url().includes('captcha')) {
-        console.error('Skyscanner: captcha failed')
-        console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], flexDates: [], error: 'PerimeterX captcha failed' }))
-        process.exit(0)
-      }
+      if (!page.url().includes('captcha')) { captchaPassed = true; break }
+      console.error(`Skyscanner: captcha attempt ${attempt} failed`)
+    } else {
+      console.error('Skyscanner: no captcha element found')
     }
+  }
+
+  if (!captchaPassed) {
+    console.error('Skyscanner: captcha failed after 3 attempts')
+    console.log(JSON.stringify({ site: 'Skyscanner', url: url.replace('skyscanner.es', 'skyscanner.com'), flights: [], flexDates: [], error: 'PerimeterX captcha failed after 3 attempts' }))
+    process.exit(0)
   }
 
   // Dismiss cookie consent

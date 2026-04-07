@@ -12,7 +12,7 @@
       <input
         id="prompt-input"
         type="text"
-        placeholder="Search flights, compare prices..."
+        placeholder="What are you looking for?"
         autocomplete="off"
         autofocus
       />
@@ -25,33 +25,67 @@
     </form>
   </header>
 
+  <section id="home">
+    <div class="home-container">
+      <h1 class="home-title">What are you looking for?</h1>
+      <div class="home-categories">
+        <button class="category-card" data-category="flights">
+          <span class="category-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.4-.1.9.3 1.1L11 12l-2 3H6l-1 1 3 2 2 3 1-1v-3l3-2 3.7 7.3c.2.4.7.5 1.1.3l.5-.3c.4-.2.6-.6.5-1.1z"/>
+            </svg>
+          </span>
+          <span class="category-name">Flights</span>
+          <span class="category-desc">Compare prices across airlines and aggregators</span>
+        </button>
+        <button class="category-card" data-category="trends">
+          <span class="category-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+          </span>
+          <span class="category-name">Trends</span>
+          <span class="category-desc">Discover what's trending across social media</span>
+        </button>
+      </div>
+      <div class="home-examples" id="home-examples"></div>
+    </div>
+  </section>
+
   <div id="filters" class="hidden">
-    <select id="price-filter" class="filter-select">
-      <option value="any">Any price</option>
-      <option value="500">Under $500</option>
-      <option value="1000">Under $1,000</option>
-      <option value="1500">Under $1,500</option>
-      <option value="2000">Under $2,000</option>
-      <option value="3000">Under $3,000</option>
-    </select>
-    <select id="duration-filter" class="filter-select">
-      <option value="any">Any duration</option>
-      <option value="720">Under 12h</option>
-      <option value="960">Under 16h</option>
-      <option value="1200">Under 20h</option>
-      <option value="1440">Under 24h</option>
-    </select>
+    <span class="flights-only-filter">
+      <select id="price-filter" class="filter-select">
+        <option value="any">Any price</option>
+        <option value="500">Under $500</option>
+        <option value="1000">Under $1,000</option>
+        <option value="1500">Under $1,500</option>
+        <option value="2000">Under $2,000</option>
+        <option value="3000">Under $3,000</option>
+      </select>
+    </span>
+    <span class="flights-only-filter">
+      <select id="duration-filter" class="filter-select">
+        <option value="any">Any duration</option>
+        <option value="720">Under 12h</option>
+        <option value="960">Under 16h</option>
+        <option value="1200">Under 20h</option>
+        <option value="1440">Under 24h</option>
+      </select>
+    </span>
     <select id="source-filter" class="filter-select">
       <option value="any">All sources</option>
     </select>
-    <div class="stops-pills">
-      <button type="button" class="stop-btn active" data-stops="any">Any</button>
-      <button type="button" class="stop-btn" data-stops="0">Direct</button>
-      <button type="button" class="stop-btn" data-stops="1">1 stop</button>
-      <button type="button" class="stop-btn" data-stops="2">2+</button>
-    </div>
+    <span class="flights-only-filter">
+      <div class="stops-pills">
+        <button type="button" class="stop-btn active" data-stops="any">Any</button>
+        <button type="button" class="stop-btn" data-stops="0">Direct</button>
+        <button type="button" class="stop-btn" data-stops="1">1 stop</button>
+        <button type="button" class="stop-btn" data-stops="2">2+</button>
+      </div>
+    </span>
     <span id="filter-count" class="filter-count"></span>
     <button id="view-toggle" type="button" class="filter-btn">All combined</button>
+    <button id="group-btn" type="button" class="filter-btn group-btn hidden">Group with AI</button>
     <button id="filter-reset" type="button" class="filter-btn">Reset</button>
   </div>
 

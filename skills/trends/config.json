@@ -1,0 +1,13 @@
+{
+  "maxConcurrent": 8,
+  "description": "Search for trending topics, keywords, and discussions across social media and the web",
+  "args": {
+    "query": "Topic or keywords to search trends for (OPTIONAL — omit to get global/current trends)",
+    "region": "Region code like US, AR, GB, global (OPTIONAL — defaults to US)",
+    "providers": "Comma-separated provider names (OPTIONAL — omit to use all). Available: google-trends,reddit,youtube,hackernews,bluesky,mastodon,twitter,tiktok"
+  },
+  "requiredFields": ["title", "source"],
+  "routerHints": "If the user asks about what's trending, popular topics, viral content, hot discussions, or current trends — use this category. If a specific topic is mentioned ('AI trends', 'teenager trends', 'crypto'), set the 'query' arg. If no specific topic, omit 'query' entirely to get global trends. Region is optional — use 2-letter country code if user mentions a country (US, AR, GB, etc). Omit region for worldwide. Provider hints: twitter and tiktok use browser scraping (slower but cover social media), the others use fast APIs.",
+  "renderer": "trends",
+  "items": "trends"
+}

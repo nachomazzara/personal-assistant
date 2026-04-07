@@ -5,6 +5,22 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { Orchestrator } from "./orchestrator.js";
 import { routePrompt } from "./router.js";
+import { groupTrends } from "./grouper.js";
+
+// Load .env file into process.env
+const __ROOT = dirname(fileURLToPath(import.meta.url));
+const envPath = join(__ROOT, ".env");
+if (existsSync(envPath)) {
+  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim();
+    if (val && !process.env[key]) process.env[key] = val;
+  }
+}
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = join(ROOT, "web");
@@ -67,6 +83,7 @@ if (existsSync(DIST_DIR)) watch(DIST_DIR, { recursive: false }, onFileChange);
 // ---------------------------------------------------------------------------
 let running = false;
 let currentOrchestrator: Orchestrator | null = null;
+let latestTrendResults: any[] = [];
 
 const send = (ws: WebSocket, data: any) => {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
@@ -151,11 +168,42 @@ wss.on("connection", (ws: WebSocket) => {
 
         const results = await orchestrator.run(msg.category, msg.args, providerPriority as any);
         send(ws, { type: "done", results });
+        // Store latest trend results for on-demand grouping
+        if (msg.category === "trends") {
+          latestTrendResults = results;
+        }
       } catch (err) {
         send(ws, { type: "error", message: (err as Error).message });
       } finally {
         currentOrchestrator = null;
         running = false;
+      }
+      return;
+    }
+
+    // On-demand: group trends via LLM
+    if (msg.type === "group-trends") {
+      try {
+        const allTrends: any[] = [];
+        for (const r of latestTrendResults) {
+          const items = (r as any).trends || [];
+          const site = (r as any).site || r.source;
+          for (const t of items) {
+            allTrends.push({ ...t, source: t.source || site });
+          }
+        }
+        if (allTrends.length === 0) {
+          send(ws, { type: "error", message: "No trends to group" });
+          return;
+        }
+        console.error(`[server] Grouping ${allTrends.length} trends via LLM...`);
+        send(ws, { type: "trends:grouping" });
+        const groups = await groupTrends(allTrends);
+        console.error(`[server] Grouped into ${groups.length} topics`);
+        send(ws, { type: "trends:grouped", trends: allTrends, groups });
+      } catch (err) {
+        console.error(`[server] Grouping failed: ${(err as Error).message}`);
+        send(ws, { type: "error", message: `Grouping failed: ${(err as Error).message}` });
       }
       return;
     }

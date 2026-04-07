@@ -5,3 +5,4 @@ web/dist/
 
 # Auto-extracted from SKILL.md by orchestrator
 skills/**/search.mjs
+.env

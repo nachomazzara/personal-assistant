@@ -1,5 +1,6 @@
 import { renderFlights, renderCombined, renderFlexDates } from "./renderers/flights.js";
 import type { FlexDateEntry } from "./renderers/flights.js";
+import { renderTrends, renderTrendsCombined, renderTrendsGrouped } from "./renderers/trends.js";
 import { renderDefault } from "./renderers/default.js";
 
 // ---------------------------------------------------------------------------
@@ -16,12 +17,82 @@ const sourceFilterEl = document.getElementById("source-filter") as HTMLSelectEle
 const filterCountEl = document.getElementById("filter-count") as HTMLElement;
 const filterResetEl = document.getElementById("filter-reset") as HTMLButtonElement;
 const viewToggle = document.getElementById("view-toggle") as HTMLButtonElement;
+const groupBtn = document.getElementById("group-btn") as HTMLButtonElement;
+const homeEl = document.getElementById("home") as HTMLElement;
+const homeExamples = document.getElementById("home-examples") as HTMLElement;
+
+// ---------------------------------------------------------------------------
+// Home screen
+// ---------------------------------------------------------------------------
+const categoryExamples: Record<string, { text: string; prompt: string }[]> = {
+  flights: [
+    { text: "Buenos Aires to New York next month", prompt: "Flights from Buenos Aires to New York next month" },
+    { text: "Cheapest flights to Europe from EZE", prompt: "Cheapest flights to Europe from EZE" },
+    { text: "EZE to Miami round trip", prompt: "Flights from EZE to Miami round trip next week" },
+  ],
+  trends: [
+    { text: "What's trending right now", prompt: "What's trending right now" },
+    { text: "AI trends", prompt: "AI trends" },
+    { text: "Teenager trends in social media", prompt: "Teenager trends in social media" },
+  ],
+};
+
+const categoryPlaceholders: Record<string, string> = {
+  flights: "Search flights... (e.g., EZE to JFK next Friday)",
+  trends: "Search trends... (e.g., what's trending in AI)",
+};
+
+function showHome() {
+  homeEl.classList.remove("hidden");
+  results.innerHTML = "";
+  filtersEl.classList.add("hidden");
+  input.placeholder = "What are you looking for?";
+  // Reset active state on cards
+  homeEl.querySelectorAll(".category-card").forEach((c) => c.classList.remove("active"));
+  homeExamples.innerHTML = "";
+}
+
+function hideHome() {
+  homeEl.classList.add("hidden");
+}
+
+function selectCategory(category: string) {
+  homeEl.querySelectorAll(".category-card").forEach((c) => c.classList.remove("active"));
+  const card = homeEl.querySelector(`[data-category="${category}"]`);
+  if (card) card.classList.add("active");
+
+  input.placeholder = categoryPlaceholders[category] || "Search...";
+  input.focus();
+
+  const examples = categoryExamples[category] || [];
+  homeExamples.innerHTML = examples.map((ex) =>
+    `<button class="example-btn" data-prompt="${ex.prompt}">${ex.text}</button>`
+  ).join("");
+
+  homeExamples.querySelectorAll(".example-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const prompt = (btn as HTMLElement).dataset.prompt || "";
+      input.value = prompt;
+      hideHome();
+      setLoading(true);
+      ws.send(JSON.stringify({ type: "prompt", text: prompt }));
+    });
+  });
+}
+
+homeEl.querySelectorAll(".category-card").forEach((card) => {
+  card.addEventListener("click", () => {
+    const category = (card as HTMLElement).dataset.category || "";
+    selectCategory(category);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Renderers registry
 // ---------------------------------------------------------------------------
 const renderers: Record<string, (data: any, container: HTMLElement) => void> = {
   flights: renderFlights,
+  trends: renderTrends,
 };
 
 function renderSkillData(category: string, data: any, container: HTMLElement) {
@@ -55,6 +126,7 @@ let lastCategory = "";
 let activeSkills = new Set<string>();
 const skillPriority = new Map<string, string>();
 let lastProviderPriority: Record<string, string[]> | undefined;
+let groupedTrendsData: { trends: any[]; groups: { label: string; description: string; items: number[] }[] } | null = null;
 
 // ---------------------------------------------------------------------------
 // Search status banner
@@ -96,6 +168,7 @@ function updateSearchBanner() {
 function handleMessage(msg: any) {
   switch (msg.type) {
     case "routing": {
+      hideHome();
       results.innerHTML = `<div class="suggestions-loading">Finding the best search for you...</div>`;
       break;
     }
@@ -170,11 +243,11 @@ function handleMessage(msg: any) {
 
       updateSourceFilter();
       applyFilters();
-      if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
+      if (getResultCards().length > 0) filtersEl.classList.remove("hidden");
 
       updateFlexDates();
 
-      const itemsKey = Object.keys(udata).find((k) => k === "flights" && Array.isArray(udata[k]));
+      const itemsKey = Object.keys(udata).find((k) => Array.isArray(udata[k]) && udata[k].length > 0);
       const itemCount = itemsKey ? udata[itemsKey].length : 0;
       const header = usection.querySelector(".source-header span:last-of-type");
       if (header) header.textContent = `${msg.skill} (${itemCount} results...)`;
@@ -205,7 +278,7 @@ function handleMessage(msg: any) {
       data.site = data.site || msg.skill;
       sourceData.set(id, data);
 
-      const doneItemsKey = Object.keys(data).find((k: string) => k === "flights" && Array.isArray(data[k]));
+      const doneItemsKey = Object.keys(data).find((k: string) => Array.isArray(data[k]) && data[k].length > 0);
       const finalCount = doneItemsKey ? data[doneItemsKey].length : 0;
       const nameSpan = section.querySelector(".source-header span:last-of-type");
       if (nameSpan) nameSpan.textContent = `${msg.skill} (${finalCount})`;
@@ -220,7 +293,7 @@ function handleMessage(msg: any) {
       updateFlexDates();
       updateSourceFilter();
       applyFilters();
-      if (getFlightCards().length > 0) filtersEl.classList.remove("hidden");
+      if (getResultCards().length > 0) filtersEl.classList.remove("hidden");
       break;
     }
 
@@ -244,9 +317,45 @@ function handleMessage(msg: any) {
       setLoading(false);
       break;
 
+    case "trends:grouping": {
+      // LLM is working — button already shows "Grouping..."
+      break;
+    }
+
+    case "trends:grouped": {
+      const { trends: allTrends, groups } = msg as any;
+      if (!groups || !allTrends) break;
+      groupedTrendsData = { trends: allTrends, groups };
+      stopGroupTimer();
+      groupBtn.classList.remove("loading");
+      groupBtn.textContent = "Refresh groups";
+      // Switch to combined/grouped view
+      viewMode = "combined";
+      viewToggle.textContent = "By source";
+      renderGroupedView();
+      updateSourceFilter();
+      applyFilters();
+      if (getResultCards().length > 0) filtersEl.classList.remove("hidden");
+      break;
+    }
+
     case "error":
       setLoading(false);
-      results.innerHTML = `<div class="source-error">${msg.message}</div>`;
+      // Reset group button if it was loading
+      if (groupBtn.classList.contains("loading")) {
+        stopGroupTimer();
+        groupBtn.classList.remove("loading");
+        groupBtn.textContent = "Group with AI";
+      }
+      // Don't wipe existing results — show error inline instead
+      if (results.children.length > 0 && sourceData.size > 0) {
+        const errEl = document.createElement("div");
+        errEl.className = "source-error";
+        errEl.textContent = msg.message;
+        results.insertBefore(errEl, results.firstChild);
+      } else {
+        results.innerHTML = `<div class="source-error">${msg.message}</div>`;
+      }
       break;
   }
 }
@@ -274,6 +383,11 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
 
   lastCategory = s.category;
   lastArgs = { ...s.args };
+  groupedTrendsData = null;
+  stopGroupTimer();
+  groupBtn.classList.remove("loading");
+  groupBtn.textContent = "Group with AI";
+  updateFiltersForCategory();
 
   // Show selected search in the input field with route details
   const details = [s.args.from, "→", s.args.to, s.args.departure, s.args.return].filter(Boolean).join(" ");
@@ -343,8 +457,24 @@ function getAllItems(): any[] {
       all.push({ ...item, _source: siteName, _url: data.url });
     }
   }
-  all.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity));
+  if (lastCategory === "trends") {
+    all.sort((a, b) => (b.volume || 0) - (a.volume || 0));
+  } else {
+    all.sort((a, b) => (a.priceRaw || Infinity) - (b.priceRaw || Infinity));
+  }
   return all;
+}
+
+function getOrCreateCombinedEl(): HTMLElement {
+  let el = document.getElementById("combined-results");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "combined-results";
+    el.className = "source-section";
+    results.appendChild(el);
+  }
+  el.style.display = "";
+  return el;
 }
 
 function renderCombinedView() {
@@ -352,17 +482,29 @@ function renderCombinedView() {
     section.style.display = "none";
   }
 
-  let combinedEl = document.getElementById("combined-results");
-  if (!combinedEl) {
-    combinedEl = document.createElement("div");
-    combinedEl.id = "combined-results";
-    combinedEl.className = "source-section";
-    results.appendChild(combinedEl);
-  }
-  combinedEl.style.display = "";
+  const combinedEl = getOrCreateCombinedEl();
 
-  const flights = getAllItems();
-  renderCombined(flights, combinedEl);
+  // For trends, use LLM-grouped data if available
+  if (lastCategory === "trends" && groupedTrendsData) {
+    renderTrendsGrouped(groupedTrendsData.trends, groupedTrendsData.groups, combinedEl);
+    return;
+  }
+
+  const items = getAllItems();
+  if (lastCategory === "trends") {
+    renderTrendsCombined(items, combinedEl);
+  } else {
+    renderCombined(items, combinedEl);
+  }
+}
+
+function renderGroupedView() {
+  if (!groupedTrendsData) return;
+  for (const section of sections.values()) {
+    section.style.display = "none";
+  }
+  const combinedEl = getOrCreateCombinedEl();
+  renderTrendsGrouped(groupedTrendsData.trends, groupedTrendsData.groups, combinedEl);
 }
 
 function renderBySourceView() {
@@ -424,8 +566,16 @@ form.addEventListener("submit", (e) => {
   if (bannerEl) bannerEl.remove();
   filtersEl.classList.add("hidden");
 
+  hideHome();
   setLoading(true);
   ws.send(JSON.stringify({ type: "prompt", text }));
+});
+
+// Show home when input is fully cleared
+input.addEventListener("input", () => {
+  if (!input.value.trim() && !isSearching) {
+    showHome();
+  }
 });
 
 let isSearching = false;
@@ -441,6 +591,10 @@ function setLoading(loading: boolean) {
 // ---------------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------------
+function getResultCards(): HTMLElement[] {
+  return Array.from(results.querySelectorAll(".flight-card, .trend-card, .trend-group"));
+}
+
 function getFlightCards(): HTMLElement[] {
   return Array.from(results.querySelectorAll(".flight-card"));
 }
@@ -466,39 +620,72 @@ function updateSourceFilter() {
   sourceFilterEl.value = current;
 }
 
+function updateFiltersForCategory() {
+  if (lastCategory === "trends") {
+    filtersEl.classList.add("trends-mode");
+    groupBtn.classList.remove("hidden");
+  } else {
+    filtersEl.classList.remove("trends-mode");
+    groupBtn.classList.add("hidden");
+  }
+}
+
+let groupTimer: ReturnType<typeof setInterval> | null = null;
+
+groupBtn.addEventListener("click", () => {
+  if (groupBtn.classList.contains("loading")) return;
+  groupBtn.classList.add("loading");
+  const start = Date.now();
+  groupBtn.textContent = "Grouping... 0s";
+  groupTimer = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - start) / 1000);
+    groupBtn.textContent = `Grouping... ${elapsed}s`;
+  }, 1000);
+  ws.send(JSON.stringify({ type: "group-trends" }));
+});
+
+function stopGroupTimer() {
+  if (groupTimer) { clearInterval(groupTimer); groupTimer = null; }
+}
+
 function applyFilters() {
+  const sourceFilter = sourceFilterEl.value;
+  const isTrends = lastCategory === "trends";
+  const cards = isTrends ? getResultCards() : getFlightCards();
+
   const priceMax = priceFilterEl.value === "any" ? Infinity : parseInt(priceFilterEl.value);
   const durationMax = durationFilterEl.value === "any" ? Infinity : parseInt(durationFilterEl.value);
-  const sourceFilter = sourceFilterEl.value;
-  const cards = getFlightCards();
 
   let visible = 0;
   for (const card of cards) {
-    const p = parseFloat(card.dataset.price || "0");
-    const d = parseFloat(card.dataset.duration || "0");
-    const s = parseInt(card.dataset.stops || "0");
-    const src = card.dataset.source || "";
+    let show = true;
 
-    const priceOk = p === 0 || p <= priceMax;
-    const durationOk = d === 0 || d <= durationMax;
-    const stopsOk = stopsFilter === "any"
-      || (stopsFilter === "0" && s === 0)
-      || (stopsFilter === "1" && s === 1)
-      || (stopsFilter === "2" && s >= 2);
-    // In combined view, _source is on the card; in by-source view, check parent section
-    let sourceOk = sourceFilter === "any";
-    if (!sourceOk) {
+    // Source filter (works for both)
+    const src = card.dataset.source || "";
+    if (sourceFilter !== "any") {
       if (src) {
-        sourceOk = src.includes(sourceFilter);
+        show = src.includes(sourceFilter);
       } else {
-        // By-source view: check the section's site name
         const section = card.closest(".source-section") as HTMLElement;
         const sectionId = section?.dataset.id || "";
         const sectionSite = sourceData.get(sectionId)?.site || "";
-        sourceOk = sectionSite.includes(sourceFilter);
+        show = sectionSite.includes(sourceFilter);
       }
     }
-    const show = priceOk && durationOk && stopsOk && sourceOk;
+
+    // Flight-specific filters
+    if (show && !isTrends) {
+      const p = parseFloat(card.dataset.price || "0");
+      const d = parseFloat(card.dataset.duration || "0");
+      const s = parseInt(card.dataset.stops || "0");
+      const priceOk = p === 0 || p <= priceMax;
+      const durationOk = d === 0 || d <= durationMax;
+      const stopsOk = stopsFilter === "any"
+        || (stopsFilter === "0" && s === 0)
+        || (stopsFilter === "1" && s === 1)
+        || (stopsFilter === "2" && s >= 2);
+      show = priceOk && durationOk && stopsOk;
+    }
 
     card.classList.toggle("filtered", !show);
     if (show) visible++;
@@ -506,9 +693,10 @@ function applyFilters() {
 
   filterCountEl.textContent = `${visible} of ${cards.length}`;
 
-  // Hide source sections with zero visible flights
+  // Hide source sections with zero visible cards
+  const cardSelector = isTrends ? ".flight-card, .trend-card" : ".flight-card";
   for (const section of sections.values()) {
-    const sectionCards = section.querySelectorAll(".flight-card");
+    const sectionCards = section.querySelectorAll(cardSelector);
     const sectionVisible = [...sectionCards].filter((c) => !c.classList.contains("filtered")).length;
     section.classList.toggle("section-hidden", sectionCards.length > 0 && sectionVisible === 0);
   }

@@ -43,6 +43,8 @@ Set `ANTHROPIC_OAUTH_REFRESH_TOKEN` or place `.auth.json` in the root.
 | `YOUTUBE_API_KEY` | YouTube trends | [Google Cloud Console](https://console.cloud.google.com) → Enable YouTube Data API v3 → Create API Key. Free 10K units/day |
 | `TWITTER_USER` | X/Twitter trends | Your X/Twitter username or email |
 | `TWITTER_PASS` | X/Twitter trends | Your X/Twitter password |
+| `TIKTOK_USER` | TikTok video dates/engagement | Your TikTok email or username |
+| `TIKTOK_PASS` | TikTok video dates/engagement | Your TikTok password |
 
 ## Skills
 
@@ -71,7 +73,7 @@ Set `ANTHROPIC_OAUTH_REFRESH_TOKEN` or place `.auth.json` in the root.
 | mastodon | Mastodon public REST API (mastodon.social) | None |
 | youtube | YouTube Data API v3 | `YOUTUBE_API_KEY` |
 | twitter | Puppeteer stealth + auto-login + API interception | `TWITTER_USER` + `TWITTER_PASS` |
-| tiktok | Puppeteer stealth + API interception / DOM scraping | None (scraping) |
+| tiktok | Public API + Puppeteer stealth with auto-login | `TIKTOK_USER` + `TIKTOK_PASS` (optional, needed for video dates) |
 
 **Trends supports two modes:**
 - **Global**: omit `query` to get what's trending right now across all platforms

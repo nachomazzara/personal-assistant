@@ -16,8 +16,8 @@ JSON to stdout: `{ "site": "TikTok", "url": "...", "trends": [...], "partial": f
 # Rules
 
 - Run the command directly
-- Global mode: public API for trending hashtags
-- Query mode: public API for hashtag stats + Puppeteer for post count from tag page
+- Requires TIKTOK_USER and TIKTOK_PASS in .env for full video data (dates, engagement)
+- Falls back to public API (hashtag stats only) without credentials
 - Your response must be ONLY the raw JSON — no text before or after
 
 ## Script
@@ -37,6 +37,9 @@ function getArg(name) {
 
 const query = getArg("query");
 const region = getArg("region") || "US";
+const TT_USER = process.env.TIKTOK_USER;
+const TT_PASS = process.env.TIKTOK_PASS;
+const PROFILE_DIR = "/tmp/tiktok-profile";
 
 const HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -73,7 +76,6 @@ async function getHashtagStats(name) {
       `https://www.tiktok.com/api/challenge/detail/?challengeName=${encodeURIComponent(name)}`
     );
     const info = data.challengeInfo || {};
-    // statsV2 has accurate counts, stats often returns 0
     const statsV2 = info.statsV2 || {};
     const stats = info.stats || {};
     return {
@@ -84,63 +86,153 @@ async function getHashtagStats(name) {
   } catch { return { views: 0, videos: 0, desc: "" }; }
 }
 
-// Scrape the tag page to get real post count from the h2 header
-async function scrapeTagPagePostCount(name) {
+// ---------------------------------------------------------------------------
+// Browser-based scraping with auto-login
+// ---------------------------------------------------------------------------
+async function launchBrowser() {
+  const hasCredentials = TT_USER && TT_PASS;
+  const browser = await puppeteerExtra.launch({
+    headless: false,
+    args: [
+      "--no-sandbox", "--start-minimized",
+      "--disable-blink-features=AutomationControlled",
+      "--window-size=1366,768",
+      ...(hasCredentials ? [`--user-data-dir=${PROFILE_DIR}`] : []),
+    ],
+  });
+  const page = (await browser.pages())[0] || await browser.newPage();
+  const cdp = await page.createCDPSession();
+  try {
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } });
+  } catch {
+    try { await cdp.send("Browser.setWindowBounds", { windowId: 1, bounds: { windowState: "minimized" } }); } catch {}
+  }
+  await page.setViewport({ width: 1366, height: 768 });
+  return { browser, page };
+}
+
+async function ensureLoggedIn(page) {
+  if (!TT_USER || !TT_PASS) return false;
+
+  await page.goto("https://www.tiktok.com/foryou", { waitUntil: "domcontentloaded", timeout: 25000 });
+  await new Promise(r => setTimeout(r, 3000));
+
+  // Check if already logged in
+  const isLoggedIn = await page.evaluate(() => {
+    return !document.querySelector('[data-e2e="top-login-button"]') &&
+           !document.body.innerText.includes("Log in to TikTok");
+  });
+  if (isLoggedIn) return true;
+
+  console.error("[tiktok] Logging in...");
+  await page.goto("https://www.tiktok.com/login/phone-or-email/email", { waitUntil: "networkidle2", timeout: 25000 });
+  await new Promise(r => setTimeout(r, 3000));
+
+  // Type email/username
+  const emailInput = await page.$('input[name="username"], input[type="text"][placeholder*="email"], input[type="text"][placeholder*="Email"]');
+  if (emailInput) {
+    await emailInput.click({ clickCount: 3 });
+    await emailInput.type(TT_USER, { delay: 40 });
+  }
+
+  // Type password
+  const passInput = await page.$('input[type="password"]');
+  if (passInput) {
+    await passInput.click();
+    await passInput.type(TT_PASS, { delay: 40 });
+  }
+
+  // Click login button
+  const loginBtn = await page.$('button[data-e2e="login-button"], button[type="submit"]');
+  if (loginBtn) await loginBtn.click();
+
+  await new Promise(r => setTimeout(r, 5000));
+
+  // Check for CAPTCHA — if present, wait longer
+  const hasCaptcha = await page.evaluate(() =>
+    !!document.querySelector('[class*="captcha"], #captcha, [id*="captcha"]')
+  );
+  if (hasCaptcha) {
+    console.error("[tiktok] CAPTCHA detected, waiting...");
+    await new Promise(r => setTimeout(r, 15000));
+  }
+
+  const loggedIn = await page.evaluate(() => {
+    return !document.querySelector('[data-e2e="top-login-button"]');
+  });
+  console.error(`[tiktok] Login ${loggedIn ? "successful" : "may have failed"}`);
+  return loggedIn;
+}
+
+// Scrape tag page: post count from header + video data from API interception
+async function scrapeTagPage(name) {
   let browser;
   try {
-    browser = await puppeteerExtra.launch({
-      headless: false,
-      args: ["--no-sandbox", "--start-minimized", "--disable-blink-features=AutomationControlled", "--window-size=1366,768"],
+    const launched = await launchBrowser();
+    browser = launched.browser;
+    const page = launched.page;
+
+    // Login if credentials available
+    const loggedIn = await ensureLoggedIn(page);
+
+    // Set up API interception BEFORE navigating to tag page
+    const videoItems = [];
+    page.on("response", async (res) => {
+      try {
+        if (res.url().includes("/api/challenge/item_list")) {
+          const text = await res.text();
+          if (text.length > 50) {
+            const data = JSON.parse(text);
+            if (data.itemList) videoItems.push(...data.itemList);
+          }
+        }
+      } catch {}
     });
-    const page = (await browser.pages())[0];
-    const cdp = await page.createCDPSession();
-    try { const {windowId} = await cdp.send("Browser.getWindowForTarget"); await cdp.send("Browser.setWindowBounds", {windowId, bounds:{windowState:"minimized"}}); } catch {}
 
     await page.goto(`https://www.tiktok.com/tag/${encodeURIComponent(name)}`, { waitUntil: "networkidle2", timeout: 25000 });
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 4000));
 
-    // Get post count from h2 header (e.g. "10K posts")
+    // Get post count from header
     const postText = await page.$eval("h2", el => el.textContent).catch(() => "");
 
-    // Intercept the item_list API response the browser makes
+    // Scroll to trigger video loading
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => window.scrollBy(0, 600));
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    // Wait a bit more for API responses
+    await new Promise(r => setTimeout(r, 2000));
+
+    await browser.close();
+
+    // Process video items
     let latestVideoDate = "";
     let latestVideoDesc = "";
-    const itemListPromise = new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve(null), 8000);
-      page.on("response", async (res) => {
-        try {
-          if (res.url().includes("/api/challenge/item_list")) {
-            const text = await res.text();
-            if (text.length > 50) {
-              clearTimeout(timeout);
-              resolve(JSON.parse(text));
-            }
-          }
-        } catch {}
-      });
-    });
+    let recentCount = 0;
+    const now = Date.now();
+    const weekAgo = now - 7 * 86400000;
 
-    // Scroll down to trigger the item_list API call
-    await page.evaluate(() => window.scrollBy(0, 600));
-    await new Promise(r => setTimeout(r, 2000));
-    await page.evaluate(() => window.scrollBy(0, 600));
-
-    const itemData = await itemListPromise;
-    if (itemData?.itemList?.length > 0) {
-      const latest = itemData.itemList[0];
+    if (videoItems.length > 0) {
+      // Sort by createTime descending
+      videoItems.sort((a, b) => (b.createTime || 0) - (a.createTime || 0));
+      const latest = videoItems[0];
       if (latest.createTime) {
         const d = new Date(latest.createTime * 1000);
-        const daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
+        const daysAgo = Math.floor((now - d.getTime()) / 86400000);
         latestVideoDate = daysAgo === 0 ? "today" : daysAgo === 1 ? "yesterday" : `${daysAgo}d ago`;
       }
       latestVideoDesc = latest.desc?.slice(0, 200) || "";
+      // Count videos from last 7 days
+      recentCount = videoItems.filter(v => v.createTime && v.createTime * 1000 > weekAgo).length;
     }
 
-    await browser.close();
-    return { postText, latestVideoDate, latestVideoDesc };
+    return { postText, latestVideoDate, latestVideoDesc, recentCount, videoItems, loggedIn };
   } catch (err) {
+    console.error(`[tiktok] scrapeTagPage error: ${err.message}`);
     if (browser) await browser.close().catch(() => {});
-    return { postText: "", latestVideoDate: "", latestVideoDesc: "" };
+    return { postText: "", latestVideoDate: "", latestVideoDesc: "", recentCount: 0, videoItems: [], loggedIn: false };
   }
 }
 
@@ -167,7 +259,7 @@ async function getGlobalTrends() {
     }
   } catch {}
 
-  // Enrich with stats
+  // Enrich with statsV2
   await Promise.all(trends.slice(0, 15).map(async (t) => {
     const name = t.title.replace(/^#/, "");
     const stats = await getHashtagStats(name);
@@ -196,7 +288,7 @@ async function getGlobalTrends() {
   return trends.slice(0, 25);
 }
 
-// ---- QUERY: hashtag stats + scrape tag page for real post count ----
+// ---- QUERY: hashtag stats + scrape tag page for videos ----
 async function searchTrends(q) {
   const name = q.replace(/^#/, "");
   const trends = [];
@@ -204,13 +296,12 @@ async function searchTrends(q) {
   // Get API stats + scrape tag page in parallel
   const [apiStats, pageData] = await Promise.all([
     getHashtagStats(name),
-    scrapeTagPagePostCount(name),
+    scrapeTagPage(name),
   ]);
 
-  // Use statsV2 for accurate video count if available
-  let videoCount = apiStats.videos;
-  const postCount = pageData.postText; // e.g. "10K posts"
+  const postCount = pageData.postText;
   const postNum = parseHumanCount(postCount);
+  let videoCount = apiStats.videos;
   if (postNum > videoCount) videoCount = postNum;
 
   // Build rich description
@@ -218,6 +309,7 @@ async function searchTrends(q) {
   if (postCount) descParts.push(postCount);
   if (apiStats.views > 0) descParts.push(`${formatCount(apiStats.views)} total views`);
   if (pageData.latestVideoDate) descParts.push(`Latest video: ${pageData.latestVideoDate}`);
+  if (pageData.recentCount > 0) descParts.push(`${pageData.recentCount} videos this week`);
   if (apiStats.desc) descParts.push(apiStats.desc);
 
   if (apiStats.views > 0 || postNum > 0) {
@@ -233,8 +325,36 @@ async function searchTrends(q) {
     });
   }
 
-  // Add latest video description as a separate entry if we got one
-  if (pageData.latestVideoDesc) {
+  // Add individual recent videos if we got them
+  for (const item of pageData.videoItems.slice(0, 15)) {
+    const desc = item.desc || "";
+    if (!desc || desc.length < 5) continue;
+    const stats = item.stats || {};
+    const author = item.author?.uniqueId || "";
+    const created = item.createTime ? new Date(item.createTime * 1000) : null;
+    const daysAgo = created ? Math.floor((Date.now() - created.getTime()) / 86400000) : null;
+    const timeLabel = daysAgo !== null ? (daysAgo === 0 ? "today" : daysAgo === 1 ? "yesterday" : `${daysAgo}d ago`) : "";
+
+    trends.push({
+      title: desc.slice(0, 200),
+      description: [
+        timeLabel ? `Posted ${timeLabel}` : "",
+        stats.playCount ? `${formatCount(stats.playCount)} plays` : "",
+      ].filter(Boolean).join(" · "),
+      source: "TikTok",
+      url: item.id ? `https://www.tiktok.com/@${author}/video/${item.id}` : `https://www.tiktok.com/tag/${name}`,
+      volume: (stats.diggCount || 0) + (stats.shareCount || 0) + (stats.commentCount || 0),
+      volumeLabel: [
+        stats.diggCount ? `${formatCount(stats.diggCount)} likes` : "",
+        stats.shareCount ? `${formatCount(stats.shareCount)} shares` : "",
+      ].filter(Boolean).join(", "),
+      category: author ? `@${author}` : `#${name}`,
+      timestamp: created ? created.toISOString() : "",
+    });
+  }
+
+  // Add latest video description if we didn't get individual items
+  if (pageData.videoItems.length === 0 && pageData.latestVideoDesc) {
     trends.push({
       title: pageData.latestVideoDesc,
       description: pageData.latestVideoDate ? `Posted ${pageData.latestVideoDate}` : "Latest video",
@@ -245,24 +365,6 @@ async function searchTrends(q) {
       category: `#${name}`,
       timestamp: "",
     });
-  }
-
-  // Also try related hashtags
-  const related = [`${name}viral`, `${name}trend`, `${name}fyp`];
-  for (const tag of related) {
-    const stats = await getHashtagStats(tag);
-    if (stats.views > 100000) {
-      trends.push({
-        title: `#${tag}`,
-        description: stats.desc || `${formatCount(stats.views)} views`,
-        source: "TikTok",
-        url: `https://www.tiktok.com/tag/${encodeURIComponent(tag)}`,
-        volume: stats.views,
-        volumeLabel: `${formatCount(stats.views)} views`,
-        category: "Related Hashtag",
-        timestamp: "",
-      });
-    }
   }
 
   return trends.slice(0, 25);

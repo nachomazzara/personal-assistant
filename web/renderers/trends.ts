@@ -20,8 +20,46 @@ interface TrendData {
   error?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Trend data store — maps IDs to trend info for the Connect button
+// ---------------------------------------------------------------------------
+export const trendDataStore = new Map<string, { title: string; description: string; source: string; url?: string; relatedTerms?: string[]; category?: string }>();
+let _trendIdCounter = 0;
+
+export function resetTrendDataStore() {
+  trendDataStore.clear();
+  _trendIdCounter = 0;
+}
+
+function storeTrend(t: { title: string; description?: string; source: string; url?: string; relatedTerms?: string[]; category?: string }): string {
+  const id = `trend-${_trendIdCounter++}`;
+  trendDataStore.set(id, {
+    title: t.title,
+    description: t.description || "",
+    source: t.source,
+    url: t.url,
+    relatedTerms: t.relatedTerms,
+    category: t.category,
+  });
+  return id;
+}
+
+function connectBtn(trendId: string): string {
+  return `<button class="trend-prompt-btn" data-trend-id="${trendId}" title="Generate video prompt connecting this trend to your topic">Connect</button>`;
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function renderTag(tag: string): string {
+  const upper = tag.toUpperCase();
+  const cls = upper === "NEW" || upper === "NEW THIS WEEK" ? "trend-tag trend-tag-new"
+    : upper === "RISING" ? "trend-tag trend-tag-rising"
+    : upper === "HOT NOW" ? "trend-tag trend-tag-hot"
+    : upper === "ORGANIC" ? "trend-tag trend-tag-organic"
+    : "trend-tag";
+  return `<span class="${cls}">${escapeHtml(tag)}</span>`;
 }
 
 function timeAgo(iso: string): string {
@@ -37,6 +75,7 @@ function timeAgo(iso: string): string {
 }
 
 function renderTrendCard(t: TrendItem): string {
+  const trendId = storeTrend(t);
   const title = escapeHtml(t.title);
   const desc = t.description ? escapeHtml(t.description) : "";
   const vol = t.volumeLabel ? escapeHtml(t.volumeLabel) : "";
@@ -49,12 +88,13 @@ function renderTrendCard(t: TrendItem): string {
     <div class="trend-main">
       <span class="trend-title">${title}</span>
       ${desc ? `<span class="trend-desc">${desc}</span>` : ""}
-      ${related.length ? `<div class="trend-related">${related.map((r) => `<span class="trend-tag">${escapeHtml(r)}</span>`).join("")}</div>` : ""}
+      ${related.length ? `<div class="trend-related">${related.map(renderTag).join("")}</div>` : ""}
     </div>
     <div class="trend-meta">
       ${cat ? `<span class="trend-category">${cat}</span>` : ""}
       ${vol ? `<span class="trend-volume">${vol}</span>` : ""}
       ${time ? `<span class="trend-time">${time}</span>` : ""}
+      ${connectBtn(trendId)}
     </div>
   </a>`;
 }
@@ -181,18 +221,27 @@ export function renderTrendsCombined(items: CombinedItem[], container: HTMLEleme
 
     const dataSources = sources.join(",");
     const href = main.url ? ` href="${escapeHtml(main.url)}" target="_blank"` : "";
+    const trendId = storeTrend({
+      title: main.title,
+      description: descriptions[0] || main.description,
+      source: sources.join(", "),
+      url: main.url,
+      relatedTerms: allRelated,
+      category: main.category,
+    });
 
     html += `<a class="trend-card${isCross ? " trend-cross-platform" : ""}" data-source="${escapeHtml(dataSources)}"${href}>
       <div class="trend-main">
         <span class="trend-title">${escapeHtml(main.title)}</span>
         ${descHtml}
         <div class="trend-sources">${sources.map((s) => `<span class="trend-source-tag">${escapeHtml(s)}</span>`).join("")}</div>
-        ${allRelated.length ? `<div class="trend-related">${allRelated.map((r) => `<span class="trend-tag">${escapeHtml(r)}</span>`).join("")}</div>` : ""}
+        ${allRelated.length ? `<div class="trend-related">${allRelated.map(renderTag).join("")}</div>` : ""}
       </div>
       <div class="trend-meta">
         ${main.category ? `<span class="trend-category">${escapeHtml(main.category)}</span>` : ""}
         ${totalVol ? `<span class="trend-volume">${totalVol.toLocaleString()}</span>` : ""}
         ${isCross ? `<span class="trend-cross">${sources.length} platforms</span>` : ""}
+        ${connectBtn(trendId)}
       </div>
     </a>`;
   }
@@ -244,6 +293,13 @@ export function renderTrendsGrouped(
   for (const { group, groupItems, sources, totalVol, isCross } of scoredGroups) {
     const dataSources = sources.join(",");
     const groupId = `group-${Math.random().toString(36).slice(2, 8)}`;
+    const trendId = storeTrend({
+      title: group.label,
+      description: group.description,
+      source: sources.join(", "),
+      relatedTerms: groupItems.flatMap((i) => i.relatedTerms || []).slice(0, 8),
+      category: groupItems[0]?.category,
+    });
 
     // Sort items within group by volume
     const sortedItems = [...groupItems].sort((a, b) => (b.volume || 0) - (a.volume || 0));
@@ -258,6 +314,7 @@ export function renderTrendsGrouped(
         <div class="trend-meta">
           ${totalVol ? `<span class="trend-volume">${totalVol.toLocaleString()}</span>` : ""}
           ${isCross ? `<span class="trend-cross">${sources.length} platforms</span>` : ""}
+          ${connectBtn(trendId)}
           <span class="trend-expand">${sortedItems.length} item${sortedItems.length > 1 ? "s" : ""} ▾</span>
         </div>
       </div>

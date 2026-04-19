@@ -6,6 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { Orchestrator } from "./orchestrator.js";
 import { routePrompt } from "./router.js";
 import { groupTrends } from "./grouper.js";
+import { generateVideoPrompt } from "./prompter.js";
 
 // Load .env file into process.env
 const __ROOT = dirname(fileURLToPath(import.meta.url));
@@ -204,6 +205,26 @@ wss.on("connection", (ws: WebSocket) => {
       } catch (err) {
         console.error(`[server] Grouping failed: ${(err as Error).message}`);
         send(ws, { type: "error", message: `Grouping failed: ${(err as Error).message}` });
+      }
+      return;
+    }
+
+    // Generate creative video prompt connecting a trend to a user topic
+    if (msg.type === "generate-prompt") {
+      const { trend, userTopic } = msg as any;
+      if (!trend || !userTopic) {
+        send(ws, { type: "error", message: "Missing trend or userTopic" });
+        return;
+      }
+      try {
+        console.error(`[server] Generating video prompt: "${trend.title}" + "${userTopic}"`);
+        send(ws, { type: "prompt:generating" });
+        const result = await generateVideoPrompt(trend, userTopic);
+        console.error(`[server] Video prompt generated`);
+        send(ws, { type: "prompt:result", result });
+      } catch (err) {
+        console.error(`[server] Prompt generation failed: ${(err as Error).message}`);
+        send(ws, { type: "prompt:error", message: `Generation failed: ${(err as Error).message}` });
       }
       return;
     }

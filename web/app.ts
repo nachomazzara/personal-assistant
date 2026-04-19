@@ -1,6 +1,6 @@
 import { renderFlights, renderCombined, renderFlexDates } from "./renderers/flights.js";
 import type { FlexDateEntry } from "./renderers/flights.js";
-import { renderTrends, renderTrendsCombined, renderTrendsGrouped } from "./renderers/trends.js";
+import { renderTrends, renderTrendsCombined, renderTrendsGrouped, trendDataStore, resetTrendDataStore } from "./renderers/trends.js";
 import { renderDefault } from "./renderers/default.js";
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,7 @@ const filtersEl = document.getElementById("filters") as HTMLElement;
 const priceFilterEl = document.getElementById("price-filter") as HTMLSelectElement;
 const durationFilterEl = document.getElementById("duration-filter") as HTMLSelectElement;
 const sourceFilterEl = document.getElementById("source-filter") as HTMLSelectElement;
+const categoryFilterEl = document.getElementById("category-filter") as HTMLSelectElement;
 const filterCountEl = document.getElementById("filter-count") as HTMLElement;
 const filterResetEl = document.getElementById("filter-reset") as HTMLButtonElement;
 const viewToggle = document.getElementById("view-toggle") as HTMLButtonElement;
@@ -242,6 +243,7 @@ function handleMessage(msg: any) {
       }
 
       updateSourceFilter();
+      updateCategoryFilter();
       applyFilters();
       if (getResultCards().length > 0) filtersEl.classList.remove("hidden");
 
@@ -292,6 +294,7 @@ function handleMessage(msg: any) {
 
       updateFlexDates();
       updateSourceFilter();
+      updateCategoryFilter();
       applyFilters();
       if (getResultCards().length > 0) filtersEl.classList.remove("hidden");
       break;
@@ -334,8 +337,38 @@ function handleMessage(msg: any) {
       viewToggle.textContent = "By source";
       renderGroupedView();
       updateSourceFilter();
+      updateCategoryFilter();
       applyFilters();
       if (getResultCards().length > 0) filtersEl.classList.remove("hidden");
+      break;
+    }
+
+    case "prompt:generating": {
+      // Modal already shows "Generating..." via the button state
+      break;
+    }
+
+    case "prompt:result": {
+      const r = msg.result as { hook: string; concept: string; prompt: string; hashtags: string[] };
+      lastPromptResult = r;
+      modalGenerate.disabled = false;
+      modalGenerate.textContent = "Generate Video Prompt";
+      modalResultHook.textContent = r.hook;
+      modalResultConcept.textContent = r.concept;
+      modalResultPrompt.textContent = r.prompt;
+      modalResultHashtags.innerHTML = r.hashtags.map((h: string) => `<span class="trend-tag">#${h}</span>`).join("");
+      modalResultEl.classList.remove("hidden");
+      break;
+    }
+
+    case "prompt:error": {
+      modalGenerate.disabled = false;
+      modalGenerate.textContent = "Generate Video Prompt";
+      modalResultEl.classList.remove("hidden");
+      modalResultHook.textContent = "";
+      modalResultConcept.textContent = msg.message || "Generation failed";
+      modalResultPrompt.textContent = "";
+      modalResultHashtags.innerHTML = "";
       break;
     }
 
@@ -374,7 +407,10 @@ function executeSuggestion(s: { label: string; category: string; args: Record<st
   activeSkills.clear();
   skillPriority.clear();
   knownSources.clear();
+  resetTrendDataStore();
   sourceFilterEl.innerHTML = '<option value="any">All sources</option>';
+  categoryFilterEl.innerHTML = '<option value="any">All categories</option>';
+  categoryFilter = "any";
   const combinedEl = document.getElementById("combined-results");
   if (combinedEl) combinedEl.remove();
   const flexEl = document.getElementById("flex-dates");
@@ -535,6 +571,7 @@ viewToggle.addEventListener("click", () => {
     renderBySourceView();
   }
 
+  updateCategoryFilter();
   applyFilters();
 });
 
@@ -557,7 +594,11 @@ form.addEventListener("submit", (e) => {
   activeSkills.clear();
   skillPriority.clear();
   knownSources.clear();
+  knownCategories.clear();
+  resetTrendDataStore();
   sourceFilterEl.innerHTML = '<option value="any">All sources</option>';
+  categoryFilterEl.innerHTML = '<option value="any">All categories</option>';
+  categoryFilter = "any";
   const combinedEl = document.getElementById("combined-results");
   if (combinedEl) combinedEl.remove();
   const flexEl = document.getElementById("flex-dates");
@@ -600,7 +641,9 @@ function getFlightCards(): HTMLElement[] {
 }
 
 let stopsFilter = "any";
+let categoryFilter = "any";
 const knownSources = new Set<string>();
+const knownCategories = new Set<string>();
 
 function updateSourceFilter() {
   // Collect all source names from sourceData
@@ -618,6 +661,28 @@ function updateSourceFilter() {
     sourceFilterEl.appendChild(opt);
   }
   sourceFilterEl.value = current;
+}
+
+function updateCategoryFilter() {
+  // Collect all categories from trend cards
+  knownCategories.clear();
+  const cards = getResultCards();
+  for (const card of cards) {
+    const cat = card.dataset.source ? card.querySelector(".trend-category")?.textContent : "";
+    if (cat && cat.trim()) {
+      knownCategories.add(cat.trim());
+    }
+  }
+  // Rebuild options
+  const current = categoryFilterEl.value;
+  categoryFilterEl.innerHTML = '<option value="any">All categories</option>';
+  for (const cat of [...knownCategories].sort()) {
+    const opt = document.createElement("option");
+    opt.value = cat;
+    opt.textContent = cat;
+    categoryFilterEl.appendChild(opt);
+  }
+  categoryFilterEl.value = current;
 }
 
 function updateFiltersForCategory() {
@@ -673,6 +738,13 @@ function applyFilters() {
       }
     }
 
+    // Category filter (trends only)
+    if (show && isTrends && categoryFilter !== "any") {
+      const catEl = card.querySelector(".trend-category");
+      const catText = catEl?.textContent?.trim() || "";
+      show = catText === categoryFilter;
+    }
+
     // Flight-specific filters
     if (show && !isTrends) {
       const p = parseFloat(card.dataset.price || "0");
@@ -705,6 +777,10 @@ function applyFilters() {
 priceFilterEl.addEventListener("change", applyFilters);
 durationFilterEl.addEventListener("change", applyFilters);
 sourceFilterEl.addEventListener("change", applyFilters);
+categoryFilterEl.addEventListener("change", () => {
+  categoryFilter = categoryFilterEl.value;
+  applyFilters();
+});
 
 document.querySelectorAll(".stop-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -719,8 +795,159 @@ filterResetEl.addEventListener("click", () => {
   priceFilterEl.value = "any";
   durationFilterEl.value = "any";
   sourceFilterEl.value = "any";
+  categoryFilterEl.value = "any";
+  categoryFilter = "any";
   stopsFilter = "any";
   document.querySelectorAll(".stop-btn").forEach((b) => b.classList.remove("active"));
   document.querySelector('.stop-btn[data-stops="any"]')?.classList.add("active");
   applyFilters();
+});
+
+// ---------------------------------------------------------------------------
+// Connect modal — generate video prompt from a trend + user topic
+// ---------------------------------------------------------------------------
+const modal = document.createElement("div");
+modal.id = "prompt-modal";
+modal.className = "prompt-modal hidden";
+modal.innerHTML = `
+  <div class="prompt-modal-backdrop"></div>
+  <div class="prompt-modal-content">
+    <button class="prompt-modal-close">&times;</button>
+    <div class="prompt-modal-header">
+      <div class="prompt-modal-trend-title"></div>
+      <div class="prompt-modal-trend-desc"></div>
+      <div class="prompt-modal-trend-source"></div>
+    </div>
+    <div class="prompt-modal-body">
+      <label class="prompt-modal-label">Connect this trend to your topic:</label>
+      <textarea class="prompt-modal-input" rows="3" placeholder="e.g., Decentraland - social hug&#10;&#10;Describe the brand, product, or concept you want to relate this trend to"></textarea>
+      <button class="prompt-modal-generate">Generate Video Prompt</button>
+    </div>
+    <div class="prompt-modal-result hidden">
+      <div class="prompt-modal-result-section">
+        <div class="prompt-modal-result-label">Hook</div>
+        <div class="prompt-modal-result-hook"></div>
+      </div>
+      <div class="prompt-modal-result-section">
+        <div class="prompt-modal-result-label">Concept</div>
+        <div class="prompt-modal-result-concept"></div>
+      </div>
+      <div class="prompt-modal-result-section">
+        <div class="prompt-modal-result-label">Video Generation Prompt</div>
+        <div class="prompt-modal-result-prompt"></div>
+      </div>
+      <div class="prompt-modal-result-section">
+        <div class="prompt-modal-result-hashtags"></div>
+      </div>
+      <div class="prompt-modal-actions">
+        <button class="prompt-modal-copy" data-target="prompt">Copy prompt</button>
+        <button class="prompt-modal-copy" data-target="all">Copy all</button>
+        <button class="prompt-modal-retry">Try again</button>
+      </div>
+    </div>
+  </div>
+`;
+document.body.appendChild(modal);
+
+const modalBackdrop = modal.querySelector(".prompt-modal-backdrop") as HTMLElement;
+const modalClose = modal.querySelector(".prompt-modal-close") as HTMLElement;
+const modalTitle = modal.querySelector(".prompt-modal-trend-title") as HTMLElement;
+const modalDesc = modal.querySelector(".prompt-modal-trend-desc") as HTMLElement;
+const modalSource = modal.querySelector(".prompt-modal-trend-source") as HTMLElement;
+const modalInput = modal.querySelector(".prompt-modal-input") as HTMLTextAreaElement;
+const modalGenerate = modal.querySelector(".prompt-modal-generate") as HTMLButtonElement;
+const modalResultEl = modal.querySelector(".prompt-modal-result") as HTMLElement;
+const modalResultHook = modal.querySelector(".prompt-modal-result-hook") as HTMLElement;
+const modalResultConcept = modal.querySelector(".prompt-modal-result-concept") as HTMLElement;
+const modalResultPrompt = modal.querySelector(".prompt-modal-result-prompt") as HTMLElement;
+const modalResultHashtags = modal.querySelector(".prompt-modal-result-hashtags") as HTMLElement;
+const modalRetry = modal.querySelector(".prompt-modal-retry") as HTMLElement;
+
+let currentModalTrend: { title: string; description: string; source: string; url?: string; relatedTerms?: string[]; category?: string } | null = null;
+let lastPromptResult: { hook: string; concept: string; prompt: string; hashtags: string[] } | null = null;
+
+function openModal(trendId: string) {
+  const data = trendDataStore.get(trendId);
+  if (!data) return;
+  currentModalTrend = data;
+  lastPromptResult = null;
+
+  modalTitle.textContent = data.title;
+  modalDesc.textContent = data.description || "";
+  modalDesc.style.display = data.description ? "" : "none";
+  modalSource.textContent = data.source;
+  modalInput.value = "";
+  modalGenerate.disabled = false;
+  modalGenerate.textContent = "Generate Video Prompt";
+  modalResultEl.classList.add("hidden");
+
+  modal.classList.remove("hidden");
+  modalInput.focus();
+}
+
+function closeModal() {
+  modal.classList.add("hidden");
+  currentModalTrend = null;
+}
+
+modalBackdrop.addEventListener("click", closeModal);
+modalClose.addEventListener("click", closeModal);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !modal.classList.contains("hidden")) closeModal();
+});
+
+modalGenerate.addEventListener("click", () => {
+  const topic = modalInput.value.trim();
+  if (!topic || !currentModalTrend) return;
+  modalGenerate.disabled = true;
+  modalGenerate.textContent = "Generating...";
+  modalResultEl.classList.add("hidden");
+  ws.send(JSON.stringify({
+    type: "generate-prompt",
+    trend: currentModalTrend,
+    userTopic: topic,
+  }));
+});
+
+modalInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    modalGenerate.click();
+  }
+});
+
+modalRetry.addEventListener("click", () => {
+  modalGenerate.disabled = false;
+  modalGenerate.textContent = "Generate Video Prompt";
+  modalResultEl.classList.add("hidden");
+  modalInput.focus();
+});
+
+// Copy buttons
+modal.querySelectorAll(".prompt-modal-copy").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (!lastPromptResult) return;
+    const target = (btn as HTMLElement).dataset.target;
+    let text = "";
+    if (target === "prompt") {
+      text = lastPromptResult.prompt;
+    } else {
+      text = `Hook: ${lastPromptResult.hook}\n\nConcept: ${lastPromptResult.concept}\n\nVideo Prompt: ${lastPromptResult.prompt}\n\n${lastPromptResult.hashtags.map((h) => `#${h}`).join(" ")}`;
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = (btn as HTMLElement).textContent;
+      (btn as HTMLElement).textContent = "Copied!";
+      setTimeout(() => { (btn as HTMLElement).textContent = orig; }, 1500);
+    });
+  });
+});
+
+// Event delegation for Connect buttons on trend cards
+results.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest(".trend-prompt-btn");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const trendId = (btn as HTMLElement).dataset.trendId || "";
+  openModal(trendId);
 });

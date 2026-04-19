@@ -243,22 +243,40 @@ export class Orchestrator extends EventEmitter {
     const lowCount = jobs.filter(j => j.priority === "low").length;
     console.error(`[orchestrator] "${category}": ${jobs.length} jobs (${topCount} top, ${midCount} mid, ${lowCount} low), max ${maxConcurrent} concurrent`);
 
+    const MAX_RETRIES = 2;
+
     const runJob = (job: typeof jobs[0]): Promise<SkillResult> => {
       const skillName = job.label ? `${job.skill.name} (${job.label})` : job.skill.name;
       const source = `${job.skill.category}/${skillName}`;
       console.error(`[orchestrator] ${source} [${job.priority}]: direct script (0 tokens)`);
       this.emit("skill:start", { category: job.skill.category, skill: skillName, priority: job.priority });
 
-      return runScriptDirect(job.skill, job.args, (partial) => {
-        this.emit("skill:update", { category: job.skill.category, skill: skillName, data: partial });
-      }, config, (child) => this.children.add(child)).then((result) => {
-        this.emit("skill:done", { category: job.skill.category, skill: skillName, data: result });
-        return result;
-      }).catch((err) => {
-        const error = (err as Error).message;
-        this.emit("skill:error", { category: job.skill.category, skill: skillName, error });
-        return { source, error } as SkillResult;
-      });
+      const attempt = async (retry: number): Promise<SkillResult> => {
+        try {
+          const result = await runScriptDirect(job.skill, job.args, (partial) => {
+            this.emit("skill:update", { category: job.skill.category, skill: skillName, data: partial });
+          }, config, (child) => this.children.add(child));
+
+          // Retry on error or empty results (if we have retries left)
+          if (result.error && retry < MAX_RETRIES && !this.aborted) {
+            console.error(`[orchestrator] ${source}: retry ${retry + 1}/${MAX_RETRIES} — ${result.error}`);
+            return attempt(retry + 1);
+          }
+
+          this.emit("skill:done", { category: job.skill.category, skill: skillName, data: result });
+          return result;
+        } catch (err) {
+          if (retry < MAX_RETRIES && !this.aborted) {
+            console.error(`[orchestrator] ${source}: retry ${retry + 1}/${MAX_RETRIES} — ${(err as Error).message}`);
+            return attempt(retry + 1);
+          }
+          const error = (err as Error).message;
+          this.emit("skill:error", { category: job.skill.category, skill: skillName, error });
+          return { source, error } as SkillResult;
+        }
+      };
+
+      return attempt(0);
     };
 
     // Run in batches of maxConcurrent, respecting priority order (jobs already sorted).
